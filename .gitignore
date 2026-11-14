@@ -1,0 +1,28 @@
+# Dependencias
+node_modules/
+
+# Secretos: clave de Gemini y cualquier otra variable de entorno
+.env
+.env.*
+!.env.example
+
+# Sesión de WhatsApp (quien tenga esta carpeta entra en tu cuenta)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Datos de la app: tareas, ajustes, resúmenes y copias de seguridad (contienen texto de tus chats)
+data/
+
+# Configuración local de herramientas
+.claude/
+
+# Copias, temporales y registros
+*.bak
+*.tmp
+*.log
+npm-debug.log*
+
+# Sistema operativo
+Thumbs.db
+Desktop.ini
+.DS_Store
