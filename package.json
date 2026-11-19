@@ -1,10 +1,11 @@
 {
   "name": "whatsapp-automation",
   "version": "1.0.0",
-  "description": "",
+  "description": "Panel que conecta WhatsApp con Gemini: resumen de chats, tareas, recordatorios y modo ocupado.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "build": "node -e \"\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -15,9 +16,13 @@
     "@google/genai": "^2.6.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "mysql2": "^3.24.6",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "socket.io": "^4.8.3",
     "whatsapp-web.js": "^1.34.7"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

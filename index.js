@@ -1,4 +1,6 @@
 require('dotenv').config();
+// La configuración se carga primero: fija la zona horaria antes de usar fechas
+const config = require('./lib/config');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { GoogleGenAI, Type, ThinkingLevel } = require('@google/genai');
 const express = require('express');
@@ -10,37 +12,88 @@ const QRCode = require('qrcode');
 const crypto = require('crypto');
 const fs = require('fs');
 const store = require('./lib/store');
+const createAuth = require('./lib/auth');
 const { findDuplicate, mergeInto, mergeDuplicates } = require('./lib/dedupe');
+const { parseCommand, isCommandText, parseBusyArgs, HELP_TEXT } = require('./lib/commands');
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-const PORT = 3000;
-const HOST = '127.0.0.1'; // Solo accesible desde este equipo, no desde la red
+const PORT = config.LOCAL_PORT;
+const PUBLIC_DIR = path.join(__dirname, 'public');
 
-// Solo se aceptan peticiones hechas desde el propio panel
-const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
-const ALLOWED_ORIGINS = new Set([`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]);
+// En local solo se aceptan peticiones de este equipo; alojada, solo las del dominio de la app
+const ALLOWED_HOSTS = new Set(config.HOSTED
+    ? config.DOMAINS
+    : [`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
+const ALLOWED_ORIGINS = new Set(config.HOSTED
+    ? config.DOMAINS.map(d => `https://${d}`)
+    : [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]);
 
 function isAllowedRequest(req) {
+    const host = String(req.headers.host || '').toLowerCase();
     const origin = req.headers.origin;
-    return ALLOWED_HOSTS.has(req.headers.host) && (!origin || ALLOWED_ORIGINS.has(origin));
+    if (ALLOWED_HOSTS.size > 0) {
+        return ALLOWED_HOSTS.has(host) && (!origin || ALLOWED_ORIGINS.has(origin));
+    }
+    // Alojada sin dominio configurado (APP_DOMAIN): al menos el origen debe ser el propio sitio
+    if (!origin) return true;
+    try { return new URL(origin).host.toLowerCase() === host; } catch (e) { return false; }
 }
+
+// Contraseña del panel. En internet es obligatoria: sin ella la app no abre el panel ni conecta WhatsApp.
+const SETUP_REQUIRED = config.AUTH_REQUIRED && !config.PASSWORD_OK;
+const auth = createAuth({
+    store,
+    password: config.PANEL_PASSWORD,
+    required: config.AUTH_REQUIRED,
+    secureCookies: config.HOSTED,
+});
 
 // Inicializar Servidor Web
 const app = express();
+if (config.HOSTED) app.set('trust proxy', 1); // detrás del proxy del alojamiento
+app.disable('x-powered-by');
 const server = http.createServer(app);
 const io = new Server(server, {
-    allowRequest: (req, callback) => callback(null, isAllowedRequest(req)),
+    allowRequest: (req, callback) => callback(null, isAllowedRequest(req) && !SETUP_REQUIRED && auth.isAuthenticated(req)),
 });
 
 app.use((req, res, next) => {
     if (!isAllowedRequest(req)) {
         return res.status(403).json({ success: false, error: 'Origen no permitido' });
     }
+    // En internet, siempre por HTTPS (la contraseña y la sesión viajan cifradas)
+    if (config.HOSTED && req.headers['x-forwarded-proto'] === 'http') {
+        return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
+    }
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (config.HOSTED) {
+        res.setHeader('Strict-Transport-Security', 'max-age=15552000');
+        res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    }
     next();
 });
+
+// Falta la contraseña (o es demasiado corta): no se muestra nada más que las instrucciones
+if (SETUP_REQUIRED) {
+    console.warn(`AVISO: falta la variable PANEL_PASSWORD (mínimo ${config.MIN_PASSWORD_LENGTH} caracteres). `
+        + 'El panel no se abrirá y WhatsApp no se conectará hasta configurarla.');
+    app.use((req, res) => {
+        res.status(503).type('html').send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
+<title>WA Automator: falta configurar</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:560px;margin:4rem auto;padding:0 1.5rem;color:#111827;line-height:1.5">
+<h1 style="font-size:1.4rem">Falta configurar la contraseña del panel</h1>
+<p>Por seguridad, la app no se abre en internet sin contraseña.</p>
+<ol><li>Añade la variable de entorno <b>PANEL_PASSWORD</b> con una contraseña de al menos ${config.MIN_PASSWORD_LENGTH} caracteres.</li>
+<li>Añade también <b>GEMINI_API_KEY</b> con tu clave de Gemini.</li>
+<li>Reinicia la aplicación.</li></ol></body></html>`);
+    });
+}
 
 // Las acciones (POST) exigen una cabecera propia que otras webs no pueden enviar
 app.use('/api', (req, res, next) => {
@@ -50,8 +103,35 @@ app.use('/api', (req, res, next) => {
     next();
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+
+// --- Acceso al panel ---
+app.get('/api/session', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, authRequired: auth.required, authenticated: auth.isAuthenticated(req) });
+});
+app.post('/api/login', (req, res) => auth.login(req, res));
+app.post('/api/panel-logout', (req, res) => auth.logout(req, res));
+
+// Lo único visible sin iniciar sesión: la página de acceso y sus estilos
+app.get(['/login', '/login.html'], (req, res) => {
+    if (auth.isAuthenticated(req)) return res.redirect('/');
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
+});
+app.get('/login.js', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'login.js')));
+app.get('/style.css', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'style.css')));
+
+// A partir de aquí, todo exige sesión iniciada
+app.use((req, res, next) => {
+    if (auth.isAuthenticated(req)) return next();
+    if (req.path.startsWith('/api/')) {
+        return res.status(401).json({ success: false, error: 'Sesión no iniciada', loginRequired: true });
+    }
+    res.redirect('/login');
+});
+
+app.use(express.static(PUBLIC_DIR));
 
 // Inicializar IA
 // Modelo principal (alias que Google mantiene apuntando al Flash más reciente)
@@ -89,30 +169,207 @@ function setState(state, extra = {}) {
 }
 
 // Inicializar Cliente WhatsApp
+const chromeArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    // Sin ventana no hace falta aceleración gráfica: evita el proceso de GPU (~150 MB de RAM)
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    // Limitar la caché del navegador a 50 MB para que la carpeta de sesión no crezca sin control
+    '--disk-cache-size=52428800',
+    '--disable-extensions',
+    '--no-first-run',
+    '--mute-audio',
+];
+if (config.CHROME_SINGLE_PROCESS) {
+    // Alojamiento compartido: Chromium solo funciona con todo en un único proceso
+    chromeArgs.push('--single-process', '--no-zygote', '--disable-dev-shm-usage');
+    // El alojamiento limita los hilos por cuenta (~1.400) y Chromium dimensiona sus hilos según los núcleos
+    // del servidor (64): al cargar WhatsApp superaba el límite ("pthread_create: Resource temporarily
+    // unavailable") y se cerraba. Estas opciones reducen mucho los hilos sin afectar a WhatsApp Web.
+    chromeArgs.push(
+        '--js-flags=--single-threaded',        // motor JavaScript sin hilos auxiliares (compilación y limpieza de memoria)
+        '--num-raster-threads=1',
+        '--renderer-process-limit=1',
+        '--disable-background-networking',     // sin registro de notificaciones de Google ni descargas en segundo plano
+        '--disable-component-update',
+        '--disable-sync',
+        '--disable-default-apps',
+        '--disable-breakpad',
+        '--disable-crash-reporter',
+        '--no-default-browser-check',
+        '--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,AudioServiceOutOfProcess,CalculateNativeWinOcclusion',
+    );
+}
+
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    // Sesión de WhatsApp y caché en carpetas fijas (en un servidor, fuera de la carpeta del despliegue)
+    authStrategy: new LocalAuth({ dataPath: config.WA_AUTH_DIR }),
+    webVersionCache: { type: 'local', path: config.WA_CACHE_DIR },
     puppeteer: {
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            // Sin ventana no hace falta aceleración gráfica: evita el proceso de GPU (~150 MB de RAM)
-            '--disable-gpu',
-            '--disable-software-rasterizer',
-            // Limitar la caché del navegador a 50 MB para que la carpeta de sesión no crezca sin control
-            '--disk-cache-size=52428800',
-            '--disable-extensions',
-            '--no-first-run',
-            '--mute-audio',
-        ],
+        args: chromeArgs,
+        // En el servidor las conexiones locales están bloqueadas: se habla con Chromium por tubería
+        ...(config.HOSTED ? { pipe: true } : {}),
+        // Las señales de apagado las gestiona shutdown(); si las captura puppeteer, Node no termina
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
     }
 });
 
+// En un servidor Chromium no viene con el despliegue: se descarga la primera vez,
+// en la carpeta de caché donde puppeteer lo buscará después.
+let chromiumDownload = null; // descarga en curso (para no lanzar dos a la vez)
+
+async function ensureChromium() {
+    if (!config.HOSTED) return;
+    const puppeteer = require('puppeteer');
+    const exe = puppeteer.executablePath();
+    if (fs.existsSync(exe)) return;
+    if (chromiumDownload) return chromiumDownload;
+
+    chromiumDownload = (async () => {
+        // La versión y la carpeta se sacan de la ruta que espera puppeteer: .../chrome/linux-<versión>/...
+        const match = /^(.*)[\\/]chrome[\\/][^\\/]+-([0-9.]+)[\\/]/.exec(exe);
+        if (!match) throw new Error(`No se reconoce la ruta de Chromium: ${exe}`);
+        const [, cacheDir, buildId] = match;
+
+        const { install, Browser, detectBrowserPlatform } = require('@puppeteer/browsers');
+        const platform = detectBrowserPlatform();
+        console.log(`Descargando Chromium ${buildId} (${platform}) en ${cacheDir} (solo la primera vez)...`);
+        const t0 = Date.now();
+        try {
+            await install({ browser: Browser.CHROME, buildId, cacheDir, platform, unpack: true });
+        } catch (e) {
+            // Que el motivo real quede en el registro
+            throw new Error(`No se pudo descargar Chromium: ${e && (e.stack || e.message) || e}`);
+        }
+        if (!fs.existsSync(exe)) throw new Error(`La descarga terminó pero no aparece ${exe}`);
+        console.log(`Chromium descargado en ${Math.round((Date.now() - t0) / 1000)} s.`);
+    })();
+
+    try {
+        await chromiumDownload;
+    } finally {
+        chromiumDownload = null;
+    }
+}
+
+async function startWhatsApp() {
+    await ensureChromium();
+    // Se vigila Chromium desde que arranca (el evento llega antes de que termine initialize)
+    const onLaunch = () => watchBrowser();
+    const timer = setInterval(() => { if (client.pupBrowser) { clearInterval(timer); onLaunch(); } }, 200);
+    try {
+        await client.initialize();
+    } finally {
+        clearInterval(timer);
+    }
+    watchBrowser();
+}
+
+// ---------- Vigilancia de Chromium ----------
+// Si Chromium se cierra (por un fallo o porque el alojamiento lo termina), whatsapp-web.js no avisa:
+// la app seguiría diciendo "Conectado" y todo fallaría. Aquí se detecta, se registra el motivo y se reconecta.
+const watchedBrowsers = new WeakSet();
+let chromeMemory = { pid: null, rssMb: null, peakMb: null, threads: null, peakThreads: null, at: null };
+
+// Memoria (MB) e hilos de un proceso, leídos de /proc (solo Linux)
+function readProcStats(pid) {
+    try {
+        const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+        const kb = Number((status.match(/^VmRSS:\s+(\d+)/m) || [])[1] || 0);
+        const threads = Number((status.match(/^Threads:\s+(\d+)/m) || [])[1] || 0);
+        return { rssMb: Math.round(kb / 1024), threads };
+    } catch (e) {
+        return null; // fuera de Linux o proceso terminado
+    }
+}
+
+// Hilos de toda la app (Node + Chromium), que es lo que cuenta para el límite del alojamiento
+function ownThreads() {
+    const self = readProcStats(process.pid);
+    const chrome = chromeMemory.pid ? readProcStats(chromeMemory.pid) : null;
+    return (self ? self.threads : 0) + (chrome ? chrome.threads : 0);
+}
+
+function watchBrowser() {
+    const browser = client.pupBrowser;
+    if (!browser || watchedBrowsers.has(browser)) return;
+    watchedBrowsers.add(browser);
+
+    const proc = browser.process();
+    const pid = proc && proc.pid;
+    const stderrTail = [];
+    if (proc && proc.stderr) {
+        proc.stderr.on('data', (chunk) => {
+            for (const line of String(chunk).split('\n')) {
+                if (line.trim()) stderrTail.push(line.trim().slice(0, 300));
+            }
+            if (stderrTail.length > 25) stderrTail.splice(0, stderrTail.length - 25);
+        });
+    }
+
+    chromeMemory = { pid, rssMb: null, peakMb: null, threads: null, peakThreads: null, at: null };
+    let samples = 0;
+    const memTimer = pid ? setInterval(() => {
+        const stats = readProcStats(pid);
+        if (!stats) return;
+        chromeMemory.rssMb = stats.rssMb;
+        chromeMemory.peakMb = Math.max(chromeMemory.peakMb || 0, stats.rssMb);
+        chromeMemory.threads = stats.threads;
+        chromeMemory.peakThreads = Math.max(chromeMemory.peakThreads || 0, stats.threads);
+        chromeMemory.at = new Date().toISOString();
+        samples++;
+        // Un informe a los 2 minutos y luego cada hora, para vigilar el consumo en el servidor
+        if (samples === 24 || samples % 720 === 0) {
+            console.log(`Chromium: ${stats.rssMb} MB (máx. ${chromeMemory.peakMb}), ${stats.threads} hilos (máx. ${chromeMemory.peakThreads}); `
+                + `app completa: ${ownThreads()} hilos.`);
+        }
+    }, 5000) : null;
+    if (memTimer) memTimer.unref();
+
+    let exitInfo = null;
+    if (proc) {
+        proc.on('exit', (code, signal) => { exitInfo = { code, signal }; });
+    }
+
+    browser.on('disconnected', () => {
+        if (memTimer) clearInterval(memTimer);
+        if (shuttingDown || isLoggingOut || isReconnecting) return; // cierre esperado
+        // Dar un momento para que llegue el código de salida
+        setTimeout(() => {
+            const why = exitInfo
+                ? (exitInfo.signal ? `señal ${exitInfo.signal}` : `código de salida ${exitInfo.code}`)
+                : 'sin código de salida';
+            console.error(`Chromium se ha cerrado inesperadamente (${why}). `
+                + `Memoria: última ${chromeMemory.rssMb ?? '?'} MB, máxima ${chromeMemory.peakMb ?? '?'} MB. `
+                + `Hilos: último ${chromeMemory.threads ?? '?'}, máximo ${chromeMemory.peakThreads ?? '?'}. `
+                + (exitInfo && exitInfo.signal === 'SIGKILL'
+                    ? 'SIGKILL suele indicar que el alojamiento lo terminó (normalmente por memoria). '
+                    : '')
+                + (stderrTail.length ? `Últimas líneas de Chromium:\n${stderrTail.slice(-12).join('\n')}` : ''));
+            // Si ya se está reconectando por otro motivo, no lanzar una segunda reconexión
+            if (isReconnecting || shuttingDown) return;
+            lastQr = null;
+            setState('disconnected');
+            scheduleReconnect();
+        }, 1000);
+    });
+}
+
 client.on('qr', async (qr) => {
-    console.log('Se requiere escanear QR. Puedes escanearlo en http://localhost:3000 o aquí en la consola:');
-    qrcodeTerminal.generate(qr, { small: true });
+    if (config.HOSTED) {
+        // En un servidor el QR no se escribe en los registros: solo se muestra en el panel
+        console.log('Se requiere escanear el código QR: abre el panel para verlo.');
+    } else {
+        console.log(`Se requiere escanear QR. Puedes escanearlo en http://localhost:${PORT} o aquí en la consola:`);
+        qrcodeTerminal.generate(qr, { small: true });
+    }
     try {
         const dataUrl = await QRCode.toDataURL(qr, { width: 250, margin: 1 });
         if (waState === 'authenticated' || waState === 'connected') return; // ya se escaneó
+        reconnectAttempts = 0;
         lastQr = dataUrl;
         io.emit('qr', dataUrl);
         setState('waiting');
@@ -135,11 +392,13 @@ client.on('loading_screen', (percent) => {
 
 client.on('ready', () => {
     console.log('¡Cliente de WhatsApp conectado y listo!');
+    reconnectAttempts = 0;
     lastQr = null;
     if (store.setAccount(client.info && client.info.wid && client.info.wid._serialized)) {
         console.log('Cuenta de WhatsApp distinta a la anterior: se reinicia lo analizado.');
     }
     setState('connected');
+    refreshSelfChatIds().catch(() => {});
     // Revisar recordatorios pendientes en cuanto se conecta (p. ej. si se abrió tarde)
     setTimeout(schedulerTick, 15 * 1000);
 });
@@ -163,10 +422,21 @@ client.on('disconnected', (reason) => {
 });
 
 // Tras una desconexión hay que cerrar el navegador y volver a inicializar
+let reconnectAttempts = 0;        // intentos seguidos, para espaciar los reintentos
+let disconnectedWhileReconnecting = false;
+
 function scheduleReconnect() {
-    if (isReconnecting) return;
+    if (isReconnecting) {
+        // Otra desconexión mientras se reiniciaba: habrá que volver a intentarlo al terminar
+        disconnectedWhileReconnecting = true;
+        return;
+    }
     isReconnecting = true;
-    console.log('Reintentando conexión en 5 segundos...');
+    disconnectedWhileReconnecting = false;
+    reconnectAttempts++;
+    // 5 s, 10 s, 20 s... hasta 1 minuto, para no entrar en un bucle rápido si algo falla siempre
+    const delay = Math.min(60000, 5000 * 2 ** Math.min(reconnectAttempts - 1, 4));
+    console.log(`Reintentando conexión en ${delay / 1000} segundos...`);
     setTimeout(async () => {
         try {
             await client.destroy();
@@ -174,7 +444,7 @@ function scheduleReconnect() {
             // El navegador puede estar ya cerrado
         }
 
-        // Si se cerró la sesión desde el móvil, borrar la sesión guardada (ya no sirve).
+        // Si se cerró la sesión, borrar la sesión guardada (ya no sirve).
         // Se hace con el navegador cerrado para que Windows no bloquee los archivos.
         if (lastDisconnectReason === 'LOGOUT') {
             try {
@@ -183,11 +453,15 @@ function scheduleReconnect() {
                 console.error('No se pudo borrar la sesión antigua:', e.message);
             }
         }
+        // whatsapp-web.js deja esta marca activada si no pudo borrar la sesión por su cuenta,
+        // y entonces trata cada arranque posterior como otro cierre de sesión (bucle sin QR).
+        client.lastLoggedOut = false;
         lastDisconnectReason = null;
 
         try {
             setState('starting');
-            await client.initialize();
+            // También reintenta la descarga de Chromium si la primera falló
+            await startWhatsApp();
         } catch (e) {
             console.error('Error al reinicializar WhatsApp:', e);
             isReconnecting = false;
@@ -196,7 +470,8 @@ function scheduleReconnect() {
             return;
         }
         isReconnecting = false;
-    }, 5000);
+        if (disconnectedWhileReconnecting) scheduleReconnect();
+    }, delay);
 }
 
 // Al abrir una pestaña nueva, enviarle el estado actual
@@ -358,6 +633,8 @@ async function messageToLine(m, chat) {
     if (m.fromMe && BOT_MARKERS.some(marker => body.startsWith(marker))) return null;
     // Ni las respuestas automáticas del modo ocupado (no las escribió el usuario)
     if (m.fromMe && isAutoReply(m)) return null;
+    // Ni los comandos que escribes a la app (/resumen, /ocupado...)
+    if (m.fromMe && isCommandText(body)) return null;
     if (m.type === 'revoked') return null;
 
     const mediaLabel = MEDIA_LABELS[m.type];
@@ -1250,8 +1527,27 @@ function rememberAutoReply(id) {
     if (ids.length > MAX_AUTO_REPLY_IDS) ids.splice(0, ids.length - MAX_AUTO_REPLY_IDS);
 }
 
+// IDs de tu propio chat: el número (@c.us) y el identificador nuevo de WhatsApp (@lid), que se resuelve al conectar
+const selfChatIds = new Set();
+
+async function refreshSelfChatIds() {
+    selfChatIds.clear();
+    const wid = client.info && client.info.wid && client.info.wid._serialized;
+    if (!wid) return;
+    selfChatIds.add(wid);
+    try {
+        const [ids] = await client.getContactLidAndPhone([wid]);
+        if (ids && ids.lid) selfChatIds.add(ids.lid);
+        if (ids && ids.pn) selfChatIds.add(ids.pn);
+    } catch (e) {
+        console.warn('No se pudo resolver el ID interno de tu chat:', e.message);
+    }
+}
+
 function isOwnChat(chatId) {
-    return !!(client.info && client.info.wid && client.info.wid._serialized === chatId);
+    if (!chatId) return false;
+    if (selfChatIds.size === 0 && client.info && client.info.wid) return client.info.wid._serialized === chatId;
+    return selfChatIds.has(chatId);
 }
 
 function emitBusyUpdate() {
@@ -1478,9 +1774,11 @@ async function setBusyMode({ active, reason, customText, durationMinutes, notify
     if (customText !== undefined) busy.customText = String(customText).slice(0, 60);
     if (typeof notifyUrgent === 'boolean') busy.notifyUrgent = notifyUrgent;
     if (typeof summaryOnEnd === 'boolean') busy.summaryOnEnd = summaryOnEnd;
-    const durationChanged = durationMinutes !== undefined && BUSY_DURATIONS.includes(Number(durationMinutes))
-        && Number(durationMinutes) !== busy.durationMinutes;
-    if (durationMinutes !== undefined && BUSY_DURATIONS.includes(Number(durationMinutes))) {
+    // Cualquier duración entera entre 0 (sin límite) y 24 horas (el panel ofrece unas fijas; los comandos, cualquiera)
+    const validDuration = durationMinutes !== undefined && Number.isInteger(Number(durationMinutes))
+        && Number(durationMinutes) >= 0 && Number(durationMinutes) <= 24 * 60;
+    const durationChanged = validDuration && Number(durationMinutes) !== busy.durationMinutes;
+    if (validDuration) {
         busy.durationMinutes = Number(durationMinutes);
     }
 
@@ -1543,6 +1841,170 @@ setInterval(() => {
         endBusyMode('se acabó el tiempo').catch(e => console.error('Modo ocupado:', e.message || e));
     }
 }, 30 * 1000);
+
+// ---------- Comandos desde tu WhatsApp ----------
+// Solo se obedecen los comandos que escribes TÚ en tu propio chat ("mensajes a ti mismo").
+
+const handledCommandIds = new Set();
+const MAX_COMMAND_AGE_S = 120; // no ejecutar comandos antiguos que lleguen al reconectar
+
+async function replyCommand(text) {
+    await sendToSelf(`${BOT_MARKER} ${text}`);
+}
+
+// Pendientes ordenadas como en el panel: vencidas, luego por urgencia y fecha límite
+function sortedPendingTasks() {
+    const rank = (t) => URGENCY_RANK[t.urgency] ?? 1;
+    return store.data.tasks.filter(t => !t.completed).sort((a, b) => {
+        const da = a.deadline ? daysUntil(a.deadline) : null;
+        const db = b.deadline ? daysUntil(b.deadline) : null;
+        const overA = da !== null && da < 0;
+        const overB = db !== null && db < 0;
+        if (overA !== overB) return overA ? -1 : 1;
+        if (rank(a) !== rank(b)) return rank(a) - rank(b);
+        if (da !== db) {
+            if (da === null) return 1;
+            if (db === null) return -1;
+            return da - db;
+        }
+        return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+}
+
+function busyDescription(busy = store.data.busy) {
+    const label = busy.reason === 'otro'
+        ? (busy.customText || 'Ocupado')
+        : (BUSY_REASONS[busy.reason] || BUSY_REASONS.ocupado).label;
+    return `${label}${busy.until ? `, hasta las ${formatClock(busy.until)}` : ', hasta que escribas /libre'}`;
+}
+
+const commandHandlers = {
+    async ayuda() {
+        await replyCommand(HELP_TEXT);
+    },
+
+    async resumen(args) {
+        const full = /^(completo|todo|2 ?dias)$/i.test(normalizeCommandArg(args));
+        const result = await runSummary({ full });
+        if (result.items.length === 0) {
+            await replyCommand(`*Sin novedades importantes* desde ${describeSince(result.since / 1000)}.`);
+            return;
+        }
+        const title = full ? 'Resumen de los últimos 2 días' : `Novedades desde ${describeSince(result.since / 1000)}`;
+        await replyCommand(`*${title}*\n\n${formatSummaryLines(result.items)}`);
+    },
+
+    async tareas() {
+        const { added } = await runTaskExtraction();
+        const pending = store.data.tasks.filter(t => !t.completed).length;
+        if (added.length === 0) {
+            await replyCommand(`*No hay tareas nuevas.* Tienes ${pending} pendientes; escribe /pendientes para verlas.`);
+            return;
+        }
+        const lines = added.slice(0, 15).map(t => taskLine(t));
+        if (added.length > 15) lines.push(`- y ${added.length - 15} más`);
+        await replyCommand(`*${added.length === 1 ? '1 tarea nueva' : `${added.length} tareas nuevas`}*\n${lines.join('\n')}\n\nPendientes en total: ${pending}.`);
+    },
+
+    async pendientes() {
+        const pending = sortedPendingTasks();
+        if (pending.length === 0) {
+            await replyCommand('*No tienes tareas pendientes.*');
+            return;
+        }
+        const MAX = 20;
+        const lines = pending.slice(0, MAX).map((t, i) => {
+            const parts = [`${i + 1}. ${t.text}`];
+            if (t.deadline) {
+                const days = daysUntil(t.deadline);
+                parts.push(days < 0 ? `(venció ${relativeDay(t.deadline)})` : `(vence ${relativeDay(t.deadline)})`);
+            } else if (t.urgency === 'alta') {
+                parts.push('(urgente)');
+            }
+            if (t.sourceName) parts.push(`· ${t.sourceName}`);
+            return parts.join(' ');
+        });
+        if (pending.length > MAX) lines.push(`... y ${pending.length - MAX} más en el panel`);
+        await replyCommand(`*Tareas pendientes (${pending.length})*\n${lines.join('\n')}`);
+    },
+
+    async ocupado(args) {
+        const parsed = parseBusyArgs(args);
+        if (parsed.error) {
+            await replyCommand(`${parsed.error}\n\nEjemplo: /ocupado iglesia 2h`);
+            return;
+        }
+        const wasActive = store.data.busy.active;
+        await setBusyMode({
+            active: true,
+            reason: parsed.reason,
+            customText: parsed.customText,
+            // Sin duración en el comando: hasta desactivarlo (o se mantiene la actual si ya estaba activo)
+            durationMinutes: parsed.durationMinutes !== undefined ? parsed.durationMinutes : (wasActive ? undefined : 0),
+        });
+        await replyCommand(`*Modo ocupado ${wasActive ? 'actualizado' : 'activado'}:* ${busyDescription()}.\n`
+            + 'Responderé por ti en los chats privados. Escribe /libre para desactivarlo.');
+    },
+
+    async libre() {
+        if (!store.data.busy.active) {
+            await replyCommand('El modo ocupado ya estaba desactivado.');
+            return;
+        }
+        const people = store.data.busy.inbox.length;
+        await endBusyMode('desactivado desde WhatsApp');
+        await replyCommand(`*Modo ocupado desactivado.*${people && store.data.busy.summaryOnEnd ? '' : (people ? ` Te escribieron ${people} personas: míralas en el panel.` : ' Nadie te escribió mientras tanto.')}`);
+    },
+
+    async estado() {
+        const busy = store.data.busy;
+        const pending = store.data.tasks.filter(t => !t.completed);
+        const overdue = pending.filter(t => t.deadline && daysUntil(t.deadline) < 0).length;
+        const s = store.data.settings;
+        const lines = [
+            `*Modo ocupado:* ${busy.active ? `activo (${busyDescription()}), ${busy.inbox.length} personas te han escrito` : 'desactivado'}`,
+            `*Tareas pendientes:* ${pending.length}${overdue ? ` (${overdue} vencidas)` : ''}`,
+            `*Resumen diario:* ${s.dailyDigest ? `a las ${s.dailyDigestTime}` : 'desactivado'}`,
+            `*Último resumen:* ${store.data.lastRun.summary ? describeSince(store.data.lastRun.summary) : 'nunca'}`,
+            `*Datos guardados en:* ${(() => { const s = store.status(); return s.backend === 'mysql' ? (s.lastFlushError ? 'MySQL (con errores, copia en archivo)' : 'MySQL') : 'archivo'; })()}`,
+        ];
+        await replyCommand(lines.join('\n'));
+    },
+};
+
+function normalizeCommandArg(text) {
+    return String(text || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+}
+
+async function handleCommandMessage(msg) {
+    if (!msg.fromMe || !isClientReady()) return;
+    const chatId = msg.to || (msg.id && msg.id.remote);
+    if (!isOwnChat(chatId)) return; // solo en tu propio chat
+    const command = parseCommand(msg.body);
+    if (!command) return;
+
+    const id = msg.id && msg.id._serialized;
+    if (id) {
+        if (handledCommandIds.has(id)) return;
+        handledCommandIds.add(id);
+        if (handledCommandIds.size > 200) handledCommandIds.delete(handledCommandIds.values().next().value);
+    }
+    if (msg.timestamp && Date.now() / 1000 - msg.timestamp > MAX_COMMAND_AGE_S) return;
+
+    console.log(`Comando recibido desde WhatsApp: /${command.name}${command.args ? ' ' + command.args.slice(0, 60) : ''}`);
+    try {
+        await commandHandlers[command.name](command.args);
+    } catch (e) {
+        console.error(`Error al ejecutar /${command.name}:`, e);
+        try {
+            await replyCommand(`No se pudo completar /${command.name}: ${describeAiError(e)}`);
+        } catch (_) { /* WhatsApp desconectado */ }
+    }
+}
+
+client.on('message_create', (msg) => {
+    handleCommandMessage(msg).catch(e => console.error('Comandos:', e.message || e));
+});
 
 // ---------- Endpoints ----------
 
@@ -1747,6 +2209,7 @@ app.post('/api/logout', async (req, res) => {
     // Olvidar lo leído de la cuenta anterior
     linkCache.clear();
     contactNameCache.clear();
+    avatarCache.clear();
     // El modo ocupado no sigue activo para la cuenta siguiente
     cancelBusyPending();
     store.data.busy.active = false;
@@ -1771,6 +2234,60 @@ app.post('/api/logout', async (req, res) => {
     } else {
         res.status(500).json({ success: false, error: 'No se pudo cerrar la sesión limpiamente; se borró la sesión local. Revisa "Dispositivos vinculados" en tu móvil.' });
     }
+});
+
+// Fotos de perfil de contactos y grupos.
+// WhatsApp da un enlace temporal a su servidor de imágenes: aquí se descarga y se guarda en memoria unas horas,
+// así el navegador no se conecta a WhatsApp, la foto no caduca y queda detrás del inicio de sesión del panel.
+const AVATAR_TTL_MS = 6 * 60 * 60 * 1000;      // fotos encontradas
+const AVATAR_MISS_TTL_MS = 60 * 60 * 1000;     // sin foto (o privada): se vuelve a mirar en 1 hora
+const AVATAR_MAX_BYTES = 512 * 1024;
+const AVATAR_MAX_ENTRIES = 300;
+const avatarCache = new Map();   // chatId -> { at, type, data } | { at, missing: true }
+const avatarPending = new Map(); // chatId -> promesa en curso (evita pedir la misma foto dos veces a la vez)
+
+async function loadAvatar(chatId) {
+    const url = await client.getProfilePicUrl(chatId).catch(() => undefined);
+    if (!url || !/^https:\/\/[a-z0-9.-]+\.(whatsapp\.net|whatsapp\.com|fbcdn\.net)\//i.test(url)) {
+        return { at: Date.now(), missing: true };
+    }
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const type = response.headers.get('content-type') || '';
+    if (!response.ok || !/^image\/(jpeg|png|webp)$/i.test(type.split(';')[0].trim())) {
+        return { at: Date.now(), missing: true };
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length === 0 || data.length > AVATAR_MAX_BYTES) return { at: Date.now(), missing: true };
+    return { at: Date.now(), type: type.split(';')[0].trim(), data };
+}
+
+app.get('/api/avatar/:chatId', requireWhatsApp, async (req, res) => {
+    const chatId = String(req.params.chatId || '');
+    if (!/^[\w.-]{3,80}@(c\.us|g\.us|lid)$/.test(chatId)) {
+        return res.status(400).end();
+    }
+
+    let entry = avatarCache.get(chatId);
+    const fresh = entry && Date.now() - entry.at < (entry.missing ? AVATAR_MISS_TTL_MS : AVATAR_TTL_MS);
+    if (!fresh) {
+        if (!avatarPending.has(chatId)) {
+            avatarPending.set(chatId, loadAvatar(chatId)
+                .catch(() => ({ at: Date.now(), missing: true }))
+                .finally(() => avatarPending.delete(chatId)));
+        }
+        entry = await avatarPending.get(chatId);
+        avatarCache.set(chatId, entry);
+        // Limitar la memoria: se descartan las más antiguas
+        if (avatarCache.size > AVATAR_MAX_ENTRIES) avatarCache.delete(avatarCache.keys().next().value);
+    }
+
+    if (entry.missing) {
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        return res.status(204).end(); // sin foto: el panel muestra la inicial
+    }
+    res.setHeader('Content-Type', entry.type);
+    res.setHeader('Cache-Control', 'private, max-age=21600');
+    res.send(entry.data);
 });
 
 // Endpoint para obtener los últimos 10 chats
@@ -1837,7 +2354,52 @@ function cleanDuplicateTasks() {
     store.save();
     console.log(`Tareas repetidas fusionadas: ${removed}. Copia de seguridad: ${backup}`);
 }
-cleanDuplicateTasks();
+
+// Importación de una sola vez: si el despliegue trae import/tareas-importar.json (tareas de otra copia de la app),
+// se añaden sin duplicar, se recuerda que ya se importó y el archivo se borra del servidor.
+const IMPORT_FILE = path.join(__dirname, 'import', 'tareas-importar.json');
+
+function importTasksFile() {
+    if (!fs.existsSync(IMPORT_FILE)) return;
+    let payload;
+    try {
+        const raw = fs.readFileSync(IMPORT_FILE, 'utf8');
+        payload = JSON.parse(raw);
+        const hash = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16);
+        if (!store.data.imports) store.data.imports = [];
+        if (store.data.imports.includes(hash)) {
+            console.log('Importación de tareas: este archivo ya se importó antes; se omite.');
+        } else {
+            const candidates = dedupCandidates();
+            let added = 0, merged = 0, archived = 0;
+            for (const t of Array.isArray(payload.tasks) ? payload.tasks : []) {
+                if (!t || typeof t.text !== 'string' || !t.text.trim()) continue;
+                const task = newTask(t);
+                task.remindedOn = t.remindedOn || null;
+                const existing = findDuplicate(task, candidates.current);
+                if (existing) { mergeInto(existing, task); merged++; continue; }
+                if (findDuplicate(task, candidates.archived)) continue;
+                store.data.tasks.push(task);
+                candidates.current.push(task);
+                added++;
+            }
+            const knownArchived = new Set(store.data.archivedTasks.map(a => a.id).filter(Boolean));
+            for (const a of Array.isArray(payload.archivedTasks) ? payload.archivedTasks : []) {
+                if (!a || typeof a.text !== 'string' || (a.id && knownArchived.has(a.id))) continue;
+                store.data.archivedTasks.push(a);
+                archived++;
+            }
+            store.data.imports.push(hash);
+            store.save();
+            console.log(`Importación de tareas: ${added} añadidas, ${merged} ya existían (unidas), ${archived} descartadas recordadas.`);
+        }
+    } catch (e) {
+        console.error('Importación de tareas: no se pudo leer el archivo:', e.message);
+        return; // se deja el archivo para revisarlo
+    }
+    // El archivo contiene texto de tus chats: no se deja en el servidor
+    try { fs.unlinkSync(IMPORT_FILE); } catch (e) { console.warn('Importación de tareas: no se pudo borrar el archivo:', e.message); }
+}
 
 server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
@@ -1848,11 +2410,47 @@ server.on('error', (err) => {
     process.exit(1);
 });
 
-server.listen(PORT, HOST, () => {
-    console.log(`Servidor web corriendo en http://localhost:${PORT}`);
-    client.initialize().catch(err => {
-        console.error('Error al inicializar WhatsApp:', err);
-        setState('disconnected');
-        scheduleReconnect();
+// Apagado limpio: cerrar Chromium y terminar. Sin esto, el alojamiento no puede reiniciar ni actualizar la app.
+let shuttingDown = false;
+async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Señal ${signal} recibida: cerrando la app...`);
+    setTimeout(() => process.exit(0), 8000).unref(); // por si Chromium o MySQL no responden
+    // Primero los datos (lo importante), después Chromium
+    try { await store.flush(); } catch (e) { /* ya registrado */ }
+    try { await client.destroy(); } catch (e) { /* ya cerrado */ }
+    process.exit(0);
+}
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => shutdown(signal));
+}
+
+// En local, solo este equipo. Alojada, el puerto lo indica la plataforma (variable PORT).
+const listenArgs = config.HOSTED ? [process.env.PORT || PORT] : [PORT, '127.0.0.1'];
+
+// Primero se cargan los datos (de MySQL si está configurado); después se abre el panel y se conecta WhatsApp
+store.init()
+    .catch((e) => {
+        console.error('Error al cargar los datos; se continúa con store.json:', e);
+        return { backend: 'archivo' };
+    })
+    .then((result) => {
+        importTasksFile();
+        cleanDuplicateTasks();
+        server.listen(...listenArgs, () => {
+            const where = result.backend === 'mysql' ? 'MySQL' : 'archivo store.json';
+            if (config.HOSTED) {
+                console.log(`Servidor web en marcha${config.DOMAINS.length ? ` en https://${config.DOMAINS[0]}` : ''}. Zona horaria: ${process.env.TZ}. Datos: ${where}.`);
+            } else {
+                console.log(`Servidor web corriendo en http://localhost:${PORT}${auth.required ? ' (con contraseña)' : ''}. Datos: ${where}.`);
+            }
+            if (SETUP_REQUIRED) return; // sin contraseña no se conecta WhatsApp
+
+            startWhatsApp().catch(err => {
+                console.error('Error al inicializar WhatsApp:', err);
+                setState('disconnected');
+                scheduleReconnect();
+            });
+        });
     });
-});

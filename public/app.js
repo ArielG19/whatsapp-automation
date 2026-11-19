@@ -1,5 +1,25 @@
 const socket = io();
 
+// --- ACCESO CON CONTRASEÑA ---
+// Si la sesión del panel caduca, cualquier petición devuelve 401: se vuelve a la página de acceso.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+    const response = await nativeFetch(...args);
+    if (response.status === 401) {
+        window.location.replace('/login');
+        return new Promise(() => {}); // la página está saliendo: no continuar
+    }
+    return response;
+};
+
+// La conexión en vivo también exige sesión: si se rechaza, comprobar si hay que volver a entrar
+socket.on('connect_error', async () => {
+    try {
+        const data = await nativeFetch('/api/session').then(r => r.json());
+        if (data.authRequired && !data.authenticated) window.location.replace('/login');
+    } catch (e) { /* servidor caído: lo gestiona el aviso de desconexión */ }
+});
+
 // --- ICONOS (SVG en línea, mismo estilo que los del menú) ---
 function icon(paths, size = 16) {
     return `<svg class="ico" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" width="${size}" height="${size}" aria-hidden="true">${paths}</svg>`;
@@ -131,6 +151,42 @@ btnLogout.addEventListener('click', async () => {
     }
 });
 
+// --- SALIR DEL PANEL (solo cuando el panel tiene contraseña) ---
+const btnPanelLogout = document.getElementById('btn-panel-logout');
+
+nativeFetch('/api/session').then(r => r.json()).then(data => {
+    if (data.authRequired) btnPanelLogout.classList.remove('hidden');
+}).catch(() => {});
+
+btnPanelLogout.addEventListener('click', async () => {
+    try { await apiPost('/api/panel-logout'); } catch (e) { console.error(e); }
+    window.location.replace('/login');
+});
+
+// --- MENÚ DEL MÓVIL (Desvincular / Salir del panel) ---
+const btnMobileMenu = document.getElementById('btn-mobile-menu');
+const sidebarFooter = document.getElementById('sidebar-footer');
+
+function setMobileMenu(open) {
+    sidebarFooter.classList.toggle('open', open);
+    btnMobileMenu.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+btnMobileMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setMobileMenu(!sidebarFooter.classList.contains('open'));
+});
+// Se cierra al tocar fuera, al pulsar una opción o con la tecla Escape
+document.addEventListener('click', (e) => {
+    if (sidebarFooter.classList.contains('open') && !sidebarFooter.contains(e.target)) setMobileMenu(false);
+});
+sidebarFooter.addEventListener('click', () => setMobileMenu(false));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setMobileMenu(false); });
+
+// Al cambiar de sección, volver arriba (en el móvil cada sección es una pantalla)
+document.querySelectorAll('.menu-item').forEach(item => {
+    item.addEventListener('click', () => document.querySelector('.main-content').scrollTo(0, 0));
+});
+
 // El servidor Node se ha caído o reiniciado: avisar en vez de seguir diciendo "Conectado"
 socket.on('disconnect', () => {
     waConnected = false;
@@ -242,6 +298,16 @@ chatsList.addEventListener('click', (e) => {
     }
 });
 
+// Fotos de perfil: si no hay (o la persona la tiene privada), se quita la imagen y queda la inicial
+function attachAvatarFallbacks(container) {
+    container.querySelectorAll('img.avatar-img').forEach(img => {
+        const drop = () => img.remove();
+        if (img.complete && img.naturalWidth === 0 && img.src) drop();
+        img.addEventListener('error', drop, { once: true });
+        img.addEventListener('load', () => { if (img.naturalWidth === 0) drop(); }, { once: true });
+    });
+}
+
 let chatsRequestId = 0;
 
 async function loadChats(silent = false) {
@@ -275,7 +341,7 @@ async function loadChats(silent = false) {
 
                 html += `
                     <div class="chat-item" data-url="${escapeHtml(linkUrl)}" style="cursor: pointer;" title="${title}">
-                        <div class="chat-avatar">${escapeHtml(initial)}</div>
+                        <div class="chat-avatar">${escapeHtml(initial)}${chat.id ? `<img class="avatar-img" src="/api/avatar/${encodeURIComponent(chat.id)}" alt="" loading="lazy" decoding="async">` : ''}</div>
                         <div class="chat-details">
                             <div class="chat-header">
                                 <span class="chat-name">${escapeHtml(chat.name)}</span>
@@ -290,6 +356,7 @@ async function loadChats(silent = false) {
                 `;
             });
             chatsList.innerHTML = html;
+            attachAvatarFallbacks(chatsList);
         } else if (!silent) {
             chatsList.innerHTML = `<div class="empty-state">${escapeHtml(data.error || 'No se pudieron cargar los chats')}</div>`;
         }
@@ -855,7 +922,15 @@ function renderBusy() {
     });
     busyCustom.classList.toggle('hidden', busy.reason !== 'otro');
     if (document.activeElement !== busyCustom) busyCustom.value = busy.customText || '';
-    busyDuration.value = String(busy.durationMinutes || 0);
+    // Duraciones puestas desde WhatsApp (p. ej. 45 min) que no están en la lista: añadirlas
+    const minutes = busy.durationMinutes || 0;
+    if (![...busyDuration.options].some(o => o.value === String(minutes))) {
+        const option = document.createElement('option');
+        option.value = String(minutes);
+        option.textContent = minutes % 60 === 0 ? `${minutes / 60} horas` : (minutes > 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} minutos`);
+        busyDuration.appendChild(option);
+    }
+    busyDuration.value = String(minutes);
     busyPreview.textContent = busy.preview;
     busyNotifyUrgent.checked = !!busy.notifyUrgent;
     busySummaryEnd.checked = !!busy.summaryOnEnd;

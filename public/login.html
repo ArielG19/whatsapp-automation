@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>WA Automator: acceso</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="auth-layout">
+        <form class="auth-card" id="login-form" autocomplete="on">
+            <h2>WA Automator</h2>
+            <p style="color: #64748b; margin-bottom: 1.5rem;">Escribe la contraseña del panel para entrar</p>
+
+            <label for="password" class="login-label">Contraseña</label>
+            <input type="password" id="password" name="password" class="login-input" autocomplete="current-password"
+                required autofocus>
+
+            <div id="login-error" class="login-error" role="alert"></div>
+
+            <button type="submit" class="btn-primary login-button" id="login-button">Entrar</button>
+        </form>
+    </div>
+
+    <script src="login.js"></script>
+</body>
+
+</html>
