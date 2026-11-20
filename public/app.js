@@ -370,7 +370,6 @@ async function loadChats(silent = false) {
 
 // --- VISTA: RESUMEN ---
 const btnResumen = document.getElementById('btn-resumen');
-const btnResumenFull = document.getElementById('btn-resumen-full');
 const btnText = btnResumen.querySelector('.btn-text');
 const btnSpinner = document.getElementById('btn-spinner');
 const summaryContent = document.getElementById('summary-content');
@@ -429,7 +428,8 @@ function renderSummaryCards(summary) {
 
     let html = '';
     const parts = [];
-    if (summary.since) parts.push(`Novedades desde ${formatDateTime(summary.since)}`);
+    if (summary.mode === 'recent') parts.push(`Tus ${summary.items.length} chats más recientes e importantes`);
+    else if (summary.since) parts.push(`Novedades desde ${formatDateTime(summary.since)}`);
     if (summary.generatedAt) parts.push(`generado ${formatDateTime(summary.generatedAt)}`);
     if (parts.length) html += `<div class="summary-generated">${escapeHtml(parts.join(' · '))}</div>`;
 
@@ -439,7 +439,7 @@ function renderSummaryCards(summary) {
 
         html += `
             <div class="summary-card">
-                <div class="summary-avatar">${escapeHtml(item.initials || '?')}</div>
+                <div class="summary-avatar">${escapeHtml(item.initials || '?')}${item.sourceId ? `<img class="avatar-img" src="/api/avatar/${encodeURIComponent(item.sourceId)}" alt="" loading="lazy" decoding="async">` : ''}</div>
                 <div class="summary-content-wrap">
                     <div class="summary-header">
                         <span class="summary-title">${escapeHtml(item.chatName)}</span>
@@ -472,7 +472,10 @@ function showNotice(el, text) {
 
 function showSummary(summary) {
     const html = renderSummaryCards(summary);
-    if (html) summaryContent.innerHTML = html;
+    if (html) {
+        summaryContent.innerHTML = html;
+        attachAvatarFallbacks(summaryContent);
+    }
 }
 
 async function loadLastSummary() {
@@ -484,26 +487,21 @@ async function loadLastSummary() {
     }
 }
 
-async function generateSummary(full) {
+async function generateSummary() {
     btnResumen.disabled = true;
-    btnResumenFull.disabled = true;
     btnText.textContent = 'Analizando...';
     btnSpinner.classList.remove('hidden');
 
     try {
-        const response = await apiPost('/api/resumen', { full });
+        const response = await apiPost('/api/resumen', {});
         const data = await response.json();
 
         if (data.success) {
-            const since = data.since ? formatDateTime(data.since) : '';
             if (data.items.length === 0) {
-                showNotice(summaryNotice, `No hay novedades importantes desde ${since}.`
-                    + (data.lastSummary ? ' Debajo tienes el último resumen.' : ''));
-                if (data.lastSummary) showSummary(data.lastSummary);
+                showNotice(summaryNotice, 'No hay conversaciones con actividad en los últimos 7 días que resumir.');
+                summaryContent.innerHTML = '';
             } else {
-                showNotice(summaryNotice, data.chatsLeft > 0
-                    ? `Había novedades en muchos chats: quedan ${data.chatsLeft} por revisar en el próximo resumen.`
-                    : '');
+                showNotice(summaryNotice, '');
                 showSummary(data);
             }
         } else {
@@ -514,14 +512,12 @@ async function generateSummary(full) {
         alert('Error de conexión con el servidor.');
     } finally {
         btnResumen.disabled = false;
-        btnResumenFull.disabled = false;
         btnText.textContent = 'Ver novedades';
         btnSpinner.classList.add('hidden');
     }
 }
 
-btnResumen.addEventListener('click', () => generateSummary(false));
-btnResumenFull.addEventListener('click', () => generateSummary(true));
+btnResumen.addEventListener('click', () => generateSummary());
 
 // --- VISTA: TAREAS ---
 const btnTasks = document.getElementById('btn-tasks');

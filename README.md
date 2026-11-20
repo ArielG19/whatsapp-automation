@@ -23,7 +23,7 @@ cp .env.example .env   # y pon tu clave en GEMINI_API_KEY
 npm start
 ```
 
-Abre `http://localhost:3000` y escanea el código QR con WhatsApp (Dispositivos vinculados).
+Abre `http://localhost:3000/panel` y escanea el código QR con WhatsApp (Dispositivos vinculados). En `/` hay una portada pública de presentación, sin datos reales ni enlaces al panel.
 
 ## Datos
 
@@ -45,6 +45,6 @@ La app detecta sola cuándo corre en Hostinger (alojamiento compartido con Node.
 
 1. Sube el código (sin `node_modules`, `.env` ni `data/`) como app Node.js con `index.js` como archivo de entrada.
 2. Añade las variables de entorno `PANEL_PASSWORD` y `GEMINI_API_KEY` (y, si quieres, crea una base de datos MySQL para la web).
-3. Reinicia la app, abre el dominio, entra con la contraseña y escanea el código QR.
+3. Reinicia la app, abre `https://tu-dominio/panel`, entra con la contraseña y escanea el código QR.
 
 En otros servidores define además `APP_DOMAIN` y `DATA_DIR` (ver `.env.example`). Usa una sola copia de la app por cuenta de WhatsApp: dos copias conectadas a la vez responderían todo por duplicado.

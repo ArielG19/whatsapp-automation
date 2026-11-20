@@ -17,7 +17,7 @@ form.addEventListener('submit', async (e) => {
         });
         const data = await response.json();
         if (data.success) {
-            window.location.replace('/');
+            window.location.replace('/panel');
             return;
         }
         errorBox.textContent = data.error || 'No se pudo iniciar sesión';

@@ -113,9 +113,10 @@ app.get('/api/session', (req, res) => {
 app.post('/api/login', (req, res) => auth.login(req, res));
 app.post('/api/panel-logout', (req, res) => auth.logout(req, res));
 
-// Lo único visible sin iniciar sesión: la página de acceso y sus estilos
+// Lo único visible sin iniciar sesión: la portada, la página de acceso y sus estilos
+app.get('/', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'home.html')));
 app.get(['/login', '/login.html'], (req, res) => {
-    if (auth.isAuthenticated(req)) return res.redirect('/');
+    if (auth.isAuthenticated(req)) return res.redirect('/panel');
     res.setHeader('Cache-Control', 'no-store');
     res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
 });
@@ -131,7 +132,12 @@ app.use((req, res, next) => {
     res.redirect('/login');
 });
 
-app.use(express.static(PUBLIC_DIR));
+// Panel (la portada pública ocupa "/")
+app.get(['/panel', '/panel/'], (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(path.join(PUBLIC_DIR, 'panel.html'));
+});
+app.use(express.static(PUBLIC_DIR, { index: false }));
 
 // Inicializar IA
 // Modelo principal (alias que Google mantiene apuntando al Flash más reciente)
@@ -401,6 +407,7 @@ client.on('ready', () => {
     refreshSelfChatIds().catch(() => {});
     // Revisar recordatorios pendientes en cuanto se conecta (p. ej. si se abrió tarde)
     setTimeout(schedulerTick, 15 * 1000);
+    maybeScheduleAudit();
 });
 
 client.on('auth_failure', (msg) => {
@@ -860,7 +867,7 @@ function describeAiError(error) {
 }
 
 // Llama a Gemini exigiendo un array con el esquema indicado. Reintenta si está saturado.
-async function askGeminiForArray(prompt, itemSchema) {
+async function askGeminiForArray(prompt, itemSchema, { thinkingLevel = GEMINI_THINKING_LEVEL } = {}) {
     if (!ai) {
         throw new Error('Falta la clave de Gemini. Añade GEMINI_API_KEY al archivo .env y reinicia la app.');
     }
@@ -881,7 +888,7 @@ async function askGeminiForArray(prompt, itemSchema) {
                     responseSchema: { type: Type.ARRAY, items: itemSchema },
                     temperature: 0.2, // respuestas más estables entre ejecuciones
                     // El nivel de razonamiento solo lo admite el modelo principal
-                    ...(model === GEMINI_MODEL ? { thinkingConfig: { thinkingLevel: GEMINI_THINKING_LEVEL } } : {}),
+                    ...(model === GEMINI_MODEL ? { thinkingConfig: { thinkingLevel } } : {}),
                 }
             });
             break;
@@ -951,7 +958,188 @@ async function runSummary({ full = false } = {}) {
 
         let items = [];
         if (contextText) {
-            const prompt = `
+            const raw = await askGeminiForArray(summaryPrompt(contextText, sinceSec), SUMMARY_ITEM_SCHEMA);
+
+            // La hora y el enlace se calculan con datos reales, no con la IA
+            const top = raw.filter(i => i && i.summaryText && meta[i.sourceId]).slice(0, 5);
+            const links = await resolveLinks(top.map(i => i.sourceId));
+            items = top.map(item => {
+                const info = meta[item.sourceId];
+                const reason = REASONS[item.reason] ? item.reason : 'novedad';
+                const result = {
+                    chatName: info.name,
+                    initials: String(item.initials || info.name.charAt(0)).slice(0, 2),
+                    summaryText: item.summaryText,
+                    category: item.category || 'General',
+                    reason,
+                    deadline: isValidIsoDate(item.deadline) ? item.deadline : '',
+                    sourceId: item.sourceId,
+                    time: formatTime(info.timestamp),
+                    link: links[item.sourceId] || 'https://web.whatsapp.com/',
+                };
+                result.reasonLabel = reasonLabel(result);
+                return result;
+            });
+        }
+
+        commitCursors('summary', newCursors, runStart);
+        const result = { items, generatedAt: Date.now(), since: sinceSec * 1000, chatsLeft };
+        store.save();
+        console.log(`Resumen generado: ${items.length} chats destacados.`);
+        return result;
+    });
+}
+
+// ---------- Resumen del panel: tus chats más recientes ----------
+// A diferencia del resumen de novedades (incremental, para WhatsApp), el panel muestra siempre
+// el estado de tus chats con actividad más reciente, personas y grupos, ordenados por importancia.
+
+const PANEL_SUMMARY_CHATS = 10;   // Chats que se muestran como máximo
+const PANEL_CANDIDATE_CHATS = 15; // Chats recientes que se leen para elegir los 10 más importantes
+const PANEL_MAX_DAYS = 7;         // Solo chats con actividad en estos días
+const PANEL_RECENT_HOURS = 72;    // Mensajes que se resumen de cada chat...
+const PANEL_MIN_MESSAGES = 12;    // ...o, si hubo pocos, al menos estos últimos
+const PANEL_FETCH = 60;
+
+async function readRecentChat(chat) {
+    let messages;
+    for (let attempt = 1; ; attempt++) {
+        try {
+            messages = await chat.fetchMessages({ limit: PANEL_FETCH });
+            break;
+        } catch (e) {
+            if (attempt < 2) { await sleep(1500); continue; }
+            console.error(`No se pudieron leer mensajes de ${getChatName(chat)}:`, e.message);
+            return null;
+        }
+    }
+
+    const now = nowSec();
+    const inWindow = messages.filter(m => m.timestamp > now - PANEL_MAX_DAYS * DAY);
+    const recent = inWindow.filter(m => m.timestamp > now - PANEL_RECENT_HOURS * 3600);
+    const picked = recent.length >= PANEL_MIN_MESSAGES ? recent : inWindow.slice(-PANEL_MIN_MESSAGES);
+
+    const lines = [];
+    for (const m of picked) {
+        const line = await messageToLine(m, chat);
+        if (line) lines.push(line);
+    }
+    if (lines.length === 0) return null;
+
+    const chatId = chat.id._serialized;
+    const chatName = getChatName(chat);
+    const tags = [chat.isGroup ? 'grupo' : 'persona'];
+    if (chat.unreadCount > 0) tags.push(`${chat.unreadCount} sin leer`);
+    if (chat.pinned) tags.push('anclado');
+    if (chat.isMuted) tags.push('silenciado');
+    const text = `--- CHAT: ${chatName} (ID: ${chatId}) [${tags.join(', ')}] ---\n${lines.join('\n')}\n\n`;
+    return { chatId, text, meta: { name: chatName, timestamp: chat.timestamp } };
+}
+
+async function runPanelSummary() {
+    return withLock('panelSummary', async () => {
+        const startedAt = Date.now();
+        const oldest = nowSec() - PANEL_MAX_DAYS * DAY;
+        const chats = (await client.getChats())
+            .filter(c => isAnalyzableChat(c) && !isOwnChat(c.id._serialized) && (c.timestamp || 0) > oldest)
+            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+            .slice(0, PANEL_CANDIDATE_CHATS);
+
+        const results = (await mapWithConcurrency(chats, READ_CONCURRENCY, readRecentChat)).filter(Boolean);
+        const meta = Object.fromEntries(results.map(r => [r.chatId, r.meta]));
+        const contextText = results.map(r => r.text).join('');
+        console.log(`[panel] Resumen de chats recientes: leídos ${results.length} en `
+            + `${((Date.now() - startedAt) / 1000).toFixed(1)} s (${contextText.length} caracteres)`);
+
+        let items = [];
+        if (contextText) {
+            const raw = await askGeminiForArray(panelSummaryPrompt(contextText), SUMMARY_ITEM_SCHEMA);
+            const seen = new Set();
+            const top = raw.filter(i => {
+                if (!i || !i.summaryText || !meta[i.sourceId] || seen.has(i.sourceId)) return false;
+                seen.add(i.sourceId);
+                return true;
+            }).slice(0, PANEL_SUMMARY_CHATS);
+            const links = await resolveLinks(top.map(i => i.sourceId));
+            items = top.map(item => {
+                const info = meta[item.sourceId];
+                const result = {
+                    chatName: info.name,
+                    initials: String(item.initials || info.name.charAt(0)).slice(0, 2),
+                    summaryText: item.summaryText,
+                    category: item.category || 'General',
+                    reason: REASONS[item.reason] ? item.reason : 'informativo',
+                    deadline: isValidIsoDate(item.deadline) ? item.deadline : '',
+                    sourceId: item.sourceId,
+                    time: formatTime(info.timestamp),
+                    link: links[item.sourceId] || 'https://web.whatsapp.com/',
+                };
+                result.reasonLabel = reasonLabel(result);
+                return result;
+            });
+        }
+
+        const result = { mode: 'recent', items, generatedAt: Date.now(), chatsRead: results.length };
+        store.data.lastSummary = result;
+        store.save();
+        console.log(`[panel] Resumen generado: ${items.length} chats.`);
+        return result;
+    });
+}
+
+function panelSummaryPrompt(contextText) {
+    return `
+Eres el asistente personal del usuario ("Yo" en los chats). Hoy es ${nowDescription()} (fecha ${todayIso()}).
+Estos son los mensajes recientes de sus chats de WhatsApp con actividad más reciente (personas y grupos).
+Cada línea empieza con el día y la hora del mensaje.
+
+Elige HASTA ${PANEL_SUMMARY_CHATS} chats y resume cada uno, ordenados del más al menos importante PARA ÉL.
+Incluye tanto conversaciones con personas como grupos. Criterios de importancia (de más a menos peso):
+1. Preguntas o peticiones dirigidas al usuario que siguen sin respuesta suya.
+2. Plazos, citas o compromisos próximos (interpreta "mañana", "el jueves", etc. respecto a la fecha de cada mensaje y a hoy).
+3. Temas de trabajo, dinero, salud o familia con decisiones pendientes.
+4. Mensajes sin leer y actividad más reciente.
+Un grupo muy activo no es importante solo por tener muchos mensajes.
+Omite solo los chats que únicamente tengan ruido (memes, stickers, cadenas reenviadas o saludos sin más).
+Si un plazo o cita ya pasó, no lo presentes como pendiente.
+
+Para cada chat devuelve:
+- chatName: el nombre del chat tal como aparece.
+- initials: iniciales del nombre (1 o 2 letras).
+- summaryText: de qué se está hablando y en qué punto está, en máximo 2 líneas. Si el usuario tiene algo pendiente (responder, decidir, entregar, asistir), dilo explícitamente.
+- category: una categoría representativa (1 o 2 palabras).
+- reason: el motivo PRINCIPAL, uno de:
+  "respuesta" (alguien espera que el usuario responda o confirme),
+  "plazo" (hay una fecha límite o entrega),
+  "decision" (el usuario debe decidir o elegir algo),
+  "cita" (reunión, quedada o cita con fecha),
+  "dinero" (pagos, cobros, gastos),
+  "novedad" (noticia o cambio importante que debe conocer),
+  "informativo" (solo para estar al tanto; úsalo para conversaciones sin nada pendiente).
+- deadline: si reason es "plazo" o "cita" y hay una fecha concreta, en formato AAAA-MM-DD; si no, cadena vacía.
+- sourceId: el ID del chat copiado EXACTAMENTE como aparece entre paréntesis.
+${DATA_ONLY_NOTICE}
+
+<chats>
+${contextText}</chats>`;
+}
+
+const SUMMARY_ITEM_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        chatName: { type: Type.STRING },
+        initials: { type: Type.STRING },
+        summaryText: { type: Type.STRING },
+        category: { type: Type.STRING },
+        reason: { type: Type.STRING, enum: Object.keys(REASONS) },
+        deadline: { type: Type.STRING },
+        sourceId: { type: Type.STRING },
+    },
+    required: ['chatName', 'summaryText', 'reason', 'sourceId'],
+};
+
+function summaryPrompt(contextText, sinceSec) {
+    return `
 Eres el asistente personal del usuario ("Yo" en los chats). Hoy es ${nowDescription()} (fecha ${todayIso()}).
 Estos son los mensajes NUEVOS de sus chats de WhatsApp desde ${describeSince(sinceSec)}.
 En algunos chats verás antes un "Contexto anterior" que el usuario ya conoce: úsalo solo para entender la conversación, no lo resumas.
@@ -986,50 +1174,6 @@ ${DATA_ONLY_NOTICE}
 
 <chats>
 ${contextText}</chats>`;
-
-            const raw = await askGeminiForArray(prompt, {
-                type: Type.OBJECT,
-                properties: {
-                    chatName: { type: Type.STRING },
-                    initials: { type: Type.STRING },
-                    summaryText: { type: Type.STRING },
-                    category: { type: Type.STRING },
-                    reason: { type: Type.STRING, enum: Object.keys(REASONS) },
-                    deadline: { type: Type.STRING },
-                    sourceId: { type: Type.STRING },
-                },
-                required: ['chatName', 'summaryText', 'reason', 'sourceId'],
-            });
-
-            // La hora y el enlace se calculan con datos reales, no con la IA
-            const top = raw.filter(i => i && i.summaryText && meta[i.sourceId]).slice(0, 5);
-            const links = await resolveLinks(top.map(i => i.sourceId));
-            items = top.map(item => {
-                const info = meta[item.sourceId];
-                const reason = REASONS[item.reason] ? item.reason : 'novedad';
-                const result = {
-                    chatName: info.name,
-                    initials: String(item.initials || info.name.charAt(0)).slice(0, 2),
-                    summaryText: item.summaryText,
-                    category: item.category || 'General',
-                    reason,
-                    deadline: isValidIsoDate(item.deadline) ? item.deadline : '',
-                    sourceId: item.sourceId,
-                    time: formatTime(info.timestamp),
-                    link: links[item.sourceId] || 'https://web.whatsapp.com/',
-                };
-                result.reasonLabel = reasonLabel(result);
-                return result;
-            });
-        }
-
-        commitCursors('summary', newCursors, runStart);
-        const result = { items, generatedAt: Date.now(), since: sinceSec * 1000, chatsLeft };
-        if (items.length > 0) store.data.lastSummary = result;
-        store.save();
-        console.log(`Resumen generado: ${items.length} chats destacados.`);
-        return result;
-    });
 }
 
 function formatSummaryLines(items) {
@@ -1044,7 +1188,8 @@ const URGENCIES = ['alta', 'media', 'baja'];
 const TASK_KINDS = ['compromiso', 'encargo', 'cita', 'pago', 'entrega', 'gestion'];
 const TASK_OWNERS = ['usuario', 'todos', 'otra_persona'];
 const MIN_TASK_CONFIDENCE = 0.7;      // Por debajo, la tarea se descarta por dudosa
-const MIN_GROUP_TASK_CONFIDENCE = 0.85; // Indicaciones a todo un grupo: se exige más seguridad
+const MIN_GROUP_TASK_CONFIDENCE = 0.85; // Indicaciones a todo un grupo: se exige más seguridad...
+const MIN_GROUP_DEADLINE_CONFIDENCE = 0.75; // ...salvo si tienen fecha límite (inscripciones, confirmaciones)
 const MAX_ARCHIVED_TASKS = 300;
 // Una tarea hecha hace más de esto ya no impide crear otra parecida (tareas que se repiten, como pagos mensuales)
 const DONE_DEDUP_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -1122,10 +1267,13 @@ SÍ es una tarea:
 - Un encargo o favor que le piden directamente a él y que no ha rechazado ("¿me puedes enviar el contrato?").
 - Una cita o reunión concreta a la que debe ir (con fecha u hora).
 - Un pago, entrega o gestión pendiente que le corresponde a él.
-- En un grupo: algo asignado expresamente a él (por su nombre o a "Yo"), o una petición a todos los miembros que exige una acción concreta de cada uno ("cada uno que traiga X", "confirmad asistencia antes del viernes").
+- Pequeños favores o recados concretos que le piden, aunque sean rápidos: mirar si algo está en un sitio, buscar algo, llevar, recoger, devolver o comprar algo, llamar a alguien ("mira si el cargador está en la bandeja", "tráeme pan").
+- Trabajo que el propio usuario dice que tiene pendiente o que le asignan (por ejemplo en un reporte o reparto de trabajo).
+- En un grupo: algo asignado expresamente a él (por su nombre o a "Yo"), o una petición a todos los miembros que exige una acción concreta de cada uno ("cada uno que traiga X", "confirmad asistencia antes del viernes", "los que vayan a ir tienen que anotarse antes de hoy a las 23:59").
+  Si depende de una condición, inclúyela en el texto: "Si vas a ir al evento X, anotarte antes del viernes".
 
 NO es una tarea:
-- Preguntas o comentarios que se resuelven contestando en el chat: "¿cómo estás?", "¿estás en casa?", "¿está llamando a la puerta?", "¿qué tal por España?". Contestar un mensaje NO es una tarea, salvo que para contestar tenga que hacer algo antes (buscar un dato, decidir algo, consultar a alguien).
+- Preguntas o comentarios que se resuelven contestando en el chat: "¿cómo estás?", "¿estás en casa?", "¿está llamando a la puerta?", "¿qué tal por España?". Contestar un mensaje NO es una tarea, salvo que para contestar tenga que hacer algo antes (mirar o buscar algo, decidir, consultar a alguien).
 - Planes vagos, saludos o despedidas: "nos vemos mañana", "a ver si quedamos", "bendiciones".
 - Lo asignado a OTRA persona: si el usuario no es Juan, "Coger mesa: hermano Juan" es tarea de Juan. En listas de reparto, solo cuenta lo asignado al usuario (por su nombre o a "Yo").
 - Lo que otras personas dicen que harán ellas.
@@ -1133,7 +1281,8 @@ NO es una tarea:
 - Tareas internas de otras personas o del equipo en general, salvo que se diga que le tocan al usuario.
 - Cosas cuyo momento ya pasó (una pregunta sobre "ahora mismo" de hace horas, un evento que ya ocurrió).
 - Cosas que el propio chat muestra como hechas o canceladas.
-Ante la duda, NO es una tarea: es mejor perder una tarea dudosa que llenar la lista de ruido.`;
+Si hay una acción concreta que le toca al usuario, inclúyela aunque sea pequeña y refleja tu seguridad en "confidence".
+Descarta lo que claramente no cumple los criterios (charla, avisos generales, cosas de otros).`;
 }
 
 async function runTaskExtraction({ full = false } = {}) {
@@ -1144,70 +1293,8 @@ async function runTaskExtraction({ full = false } = {}) {
         const discarded = { noEsTarea: 0, deOtros: 0, dudosa: 0, yaExistia: 0 };
 
         if (contextText) {
-            // Tareas que ya tiene (pendientes y hechas en los últimos 30 días), con código para poder referirse a ellas
-            const recentLimit = Date.now() - 30 * DAY * 1000;
-            const existing = store.data.tasks
-                .filter(t => !t.completed || (t.completedAt || 0) > recentLimit)
-                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-                .slice(0, 150);
-            const byShortId = new Map(existing.map(t => [shortId(t.id), t]));
-            const dismissed = store.data.archivedTasks
-                .filter(t => t.reason !== 'completada')
-                .slice(-60)
-                .map(t => `- ${t.text.slice(0, 160)} (chat: ${t.sourceName || '?'})`);
-
-            const prompt = `
-Eres el asistente personal del usuario. Hoy es ${nowDescription()} (fecha ${todayIso()}).
-Busca en los "Mensajes nuevos" de sus chats de WhatsApp las TAREAS REALES del usuario.
-En algunos chats verás antes un "Contexto anterior" ya analizado: úsalo solo para entender la conversación; extrae tareas únicamente de los "Mensajes nuevos".
-${taskCriteria(getUserName())}
-
-Evita duplicados:
-- Si una petición se repite en varios mensajes o chats, es UNA sola tarea.
-- Si lo que encuentras ya está en la lista "Tareas que ya tiene" (aunque esté redactado distinto o venga de otro mensaje), pon su código en "existingTaskId". Si es nueva, deja "existingTaskId" vacío.
-- No propongas nada parecido a la lista "Descartadas por el usuario": ya dijo que no son tareas para él.
-
-Para cada posible tarea devuelve:
-- text: acción concreta empezando por un verbo (por ejemplo "Enviar el contrato a Ana").
-- isRealTask: true solo si cumple los criterios de "SÍ es una tarea"; false si es una pregunta, comentario, aviso o algo de otra persona.
-- owner: "usuario" (le toca a él), "todos" (petición a todos los miembros de un grupo que incluye al usuario) u "otra_persona".
-- kind: "compromiso", "encargo", "cita", "pago", "entrega" o "gestion".
-- confidence: número de 0 a 1 con tu seguridad de que es una tarea real y pendiente del usuario.
-- existingTaskId: código de la tarea existente equivalente, o cadena vacía.
-- sourceName: nombre del chat de donde sale.
-- sourceId: el ID del chat copiado EXACTAMENTE como aparece entre paréntesis.
-- urgency: "alta" si vence hoy o mañana o alguien espera algo de él ya; "media" si vence esta semana; "baja" en el resto.
-- deadline: fecha límite en formato AAAA-MM-DD si se menciona o se deduce con seguridad (calcula fechas relativas como "el viernes" a partir de hoy); si no, cadena vacía.
-- quote: el mensaje exacto que justifica la tarea.
-Si no hay tareas, devuelve [].
-
-Tareas que ya tiene:
-${existing.length > 0 ? existing.map(taskForPrompt).join('\n') : '(ninguna)'}
-
-Descartadas por el usuario:
-${dismissed.length > 0 ? dismissed.join('\n') : '(ninguna)'}
-${DATA_ONLY_NOTICE}
-
-<chats>
-${contextText}</chats>`;
-
-            const raw = await askGeminiForArray(prompt, {
-                type: Type.OBJECT,
-                properties: {
-                    text: { type: Type.STRING },
-                    isRealTask: { type: Type.BOOLEAN },
-                    owner: { type: Type.STRING, enum: TASK_OWNERS },
-                    kind: { type: Type.STRING, enum: TASK_KINDS },
-                    confidence: { type: Type.NUMBER },
-                    existingTaskId: { type: Type.STRING },
-                    sourceName: { type: Type.STRING },
-                    sourceId: { type: Type.STRING },
-                    urgency: { type: Type.STRING, enum: URGENCIES },
-                    deadline: { type: Type.STRING },
-                    quote: { type: Type.STRING },
-                },
-                required: ['text', 'isRealTask', 'owner', 'confidence', 'existingTaskId', 'sourceId', 'urgency'],
-            });
+            const { prompt, byShortId } = taskPrompt(contextText);
+            const raw = await askGeminiForArray(prompt, TASK_ITEM_SCHEMA);
 
             const links = await resolveLinks(raw.map(t => t && t.sourceId));
             const candidates = dedupCandidates();
@@ -1215,11 +1302,8 @@ ${contextText}</chats>`;
                 if (!t || !t.text || !String(t.text).trim()) continue;
 
                 // Filtros de calidad: solo tareas reales, del usuario y con suficiente seguridad
-                const confidence = Number(t.confidence);
-                if (t.isRealTask !== true) { discarded.noEsTarea++; continue; }
-                if (t.owner === 'otra_persona') { discarded.deOtros++; continue; }
-                const minConfidence = t.owner === 'todos' ? MIN_GROUP_TASK_CONFIDENCE : MIN_TASK_CONFIDENCE;
-                if (!(confidence >= minConfidence)) { discarded.dudosa++; continue; }
+                const rejected = taskRejection(t);
+                if (rejected) { discarded[rejected]++; continue; }
 
                 const task = newTask({
                     ...t,
@@ -1255,6 +1339,84 @@ ${contextText}</chats>`;
     });
 }
 
+// Motivo para descartar una posible tarea devuelta por la IA, o null si pasa los filtros
+function taskRejection(t) {
+    if (t.isRealTask !== true) return 'noEsTarea';
+    if (t.owner === 'otra_persona') return 'deOtros';
+    const minConfidence = t.owner !== 'todos' ? MIN_TASK_CONFIDENCE
+        : (isValidIsoDate(t.deadline) ? MIN_GROUP_DEADLINE_CONFIDENCE : MIN_GROUP_TASK_CONFIDENCE);
+    if (!(Number(t.confidence) >= minConfidence)) return 'dudosa';
+    return null;
+}
+
+const TASK_ITEM_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        text: { type: Type.STRING },
+        isRealTask: { type: Type.BOOLEAN },
+        owner: { type: Type.STRING, enum: TASK_OWNERS },
+        kind: { type: Type.STRING, enum: TASK_KINDS },
+        confidence: { type: Type.NUMBER },
+        existingTaskId: { type: Type.STRING },
+        sourceName: { type: Type.STRING },
+        sourceId: { type: Type.STRING },
+        urgency: { type: Type.STRING, enum: URGENCIES },
+        deadline: { type: Type.STRING },
+        quote: { type: Type.STRING },
+    },
+    required: ['text', 'isRealTask', 'owner', 'confidence', 'existingTaskId', 'sourceId', 'urgency'],
+};
+
+function taskPrompt(contextText) {
+    // Tareas que ya tiene (pendientes y hechas en los últimos 30 días), con código para poder referirse a ellas
+    const recentLimit = Date.now() - 30 * DAY * 1000;
+    const existing = store.data.tasks
+        .filter(t => !t.completed || (t.completedAt || 0) > recentLimit)
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        .slice(0, 150);
+    const byShortId = new Map(existing.map(t => [shortId(t.id), t]));
+    const dismissed = store.data.archivedTasks
+        .filter(t => t.reason !== 'completada')
+        .slice(-60)
+        .map(t => `- ${t.text.slice(0, 160)} (chat: ${t.sourceName || '?'})`);
+
+    const prompt = `
+Eres el asistente personal del usuario. Hoy es ${nowDescription()} (fecha ${todayIso()}).
+Busca en los "Mensajes nuevos" de sus chats de WhatsApp las TAREAS REALES del usuario.
+En algunos chats verás antes un "Contexto anterior" ya analizado: úsalo solo para entender la conversación; extrae tareas únicamente de los "Mensajes nuevos".
+${taskCriteria(getUserName())}
+
+Evita duplicados:
+- Si una petición se repite en varios mensajes o chats, es UNA sola tarea.
+- Si lo que encuentras ya está en la lista "Tareas que ya tiene" (aunque esté redactado distinto o venga de otro mensaje), pon su código en "existingTaskId". Si es nueva, deja "existingTaskId" vacío.
+- No propongas nada parecido a la lista "Descartadas por el usuario": ya dijo que no son tareas para él.
+
+Para cada posible tarea devuelve:
+- text: acción concreta empezando por un verbo (por ejemplo "Enviar el contrato a Ana").
+- isRealTask: true solo si cumple los criterios de "SÍ es una tarea"; false si es una pregunta, comentario, aviso o algo de otra persona.
+- owner: "usuario" (le toca a él), "todos" (petición a todos los miembros de un grupo que incluye al usuario) u "otra_persona".
+- kind: "compromiso", "encargo", "cita", "pago", "entrega" o "gestion".
+- confidence: número de 0 a 1 con tu seguridad de que es una tarea real y pendiente del usuario.
+- existingTaskId: código de la tarea existente equivalente, o cadena vacía.
+- sourceName: nombre del chat de donde sale.
+- sourceId: el ID del chat copiado EXACTAMENTE como aparece entre paréntesis.
+- urgency: "alta" si vence hoy o mañana o alguien espera algo de él ya; "media" si vence esta semana; "baja" en el resto.
+- deadline: fecha límite en formato AAAA-MM-DD si se menciona o se deduce con seguridad (calcula fechas relativas como "el viernes" a partir de hoy); si no, cadena vacía.
+- quote: el mensaje exacto que justifica la tarea.
+Si no hay tareas, devuelve [].
+
+Tareas que ya tiene:
+${existing.length > 0 ? existing.map(taskForPrompt).join('\n') : '(ninguna)'}
+
+Descartadas por el usuario:
+${dismissed.length > 0 ? dismissed.join('\n') : '(ninguna)'}
+${DATA_ONLY_NOTICE}
+
+<chats>
+${contextText}</chats>`;
+    return { prompt, byShortId };
+}
+
 // Revisa con la IA las tareas pendientes ya guardadas: quita las que no son tareas y une las repetidas
 const REVIEW_VERDICTS = ['mantener', 'no_es_tarea', 'de_otra_persona', 'caducada', 'duplicada'];
 const REVIEW_REASON_TEXT = {
@@ -1270,41 +1432,7 @@ async function reviewTasks() {
         if (pending.length === 0) return { removed: [], counts: {} };
 
         const byShortId = new Map(pending.map(t => [shortId(t.id), t]));
-        const list = pending.map(t => {
-            const created = new Date(t.createdAt || Date.now()).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
-            return `- [${shortId(t.id)}] ${t.text}\n  chat: ${t.sourceName || '?'} | creada: ${created}${t.deadline ? ` | vence: ${t.deadline}` : ''}\n  mensaje de origen: "${clip(String(t.quote || '').replace(/\s+/g, ' '), 300)}"`;
-        }).join('\n');
-
-        const prompt = `
-Eres el asistente personal del usuario. Hoy es ${nowDescription()} (fecha ${todayIso()}).
-Esta es su lista de tareas pendientes, extraídas automáticamente de WhatsApp. Algunas son ruido. Revísala con estos criterios:
-${taskCriteria(getUserName())}
-
-Para CADA tarea de la lista devuelve:
-- id: su código entre corchetes.
-- verdict:
-  "mantener" si es una tarea real y pendiente del usuario;
-  "no_es_tarea" si es una pregunta, comentario, plan vago o aviso general;
-  "de_otra_persona" si le corresponde a otra persona;
-  "caducada" si ya no tiene sentido hacerla (su momento pasó sin remedio). Una tarea solo vencida pero aún realizable es "mantener";
-  "duplicada" si es la misma tarea que otra de la lista.
-- duplicateOf: si es "duplicada", el código de la tarea que se queda (la más completa); si no, cadena vacía. Nunca dos tareas duplicadas entre sí: una se queda con "mantener".
-- reason: explicación muy breve.
-${DATA_ONLY_NOTICE.replace('<chats> y </chats>', 'los "mensajes de origen"')}
-
-Tareas:
-${list}`;
-
-        const raw = await askGeminiForArray(prompt, {
-            type: Type.OBJECT,
-            properties: {
-                id: { type: Type.STRING },
-                verdict: { type: Type.STRING, enum: REVIEW_VERDICTS },
-                duplicateOf: { type: Type.STRING },
-                reason: { type: Type.STRING },
-            },
-            required: ['id', 'verdict', 'duplicateOf'],
-        });
+        const raw = await askGeminiForArray(reviewPrompt(pending), REVIEW_ITEM_SCHEMA);
 
         const toRemove = new Map(); // id -> verdict
         for (const r of raw) {
@@ -1340,6 +1468,175 @@ ${list}`;
         console.log(`Revisión de tareas: quitadas ${removed.length} (${Object.entries(counts).map(([k, v]) => `${v} ${REVIEW_REASON_TEXT[k]}`).join(', ')}).`);
         return { removed, counts };
     });
+}
+
+const REVIEW_ITEM_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        id: { type: Type.STRING },
+        verdict: { type: Type.STRING, enum: REVIEW_VERDICTS },
+        duplicateOf: { type: Type.STRING },
+        reason: { type: Type.STRING },
+    },
+    required: ['id', 'verdict', 'duplicateOf'],
+};
+
+function reviewPrompt(pending) {
+    const list = pending.map(t => {
+        const created = new Date(t.createdAt || Date.now()).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
+        return `- [${shortId(t.id)}] ${t.text}\n  chat: ${t.sourceName || '?'} | creada: ${created}${t.deadline ? ` | vence: ${t.deadline}` : ''}\n  mensaje de origen: "${clip(String(t.quote || '').replace(/\s+/g, ' '), 300)}"`;
+    }).join('\n');
+
+    return `
+Eres el asistente personal del usuario. Hoy es ${nowDescription()} (fecha ${todayIso()}).
+Esta es su lista de tareas pendientes, extraídas automáticamente de WhatsApp. Algunas son ruido. Revísala con estos criterios:
+${taskCriteria(getUserName())}
+
+Para CADA tarea de la lista devuelve:
+- id: su código entre corchetes.
+- verdict:
+  "mantener" si es una tarea real y pendiente del usuario;
+  "no_es_tarea" si es una pregunta, comentario, plan vago o aviso general;
+  "de_otra_persona" si le corresponde a otra persona;
+  "caducada" si ya no tiene sentido hacerla (su momento pasó sin remedio). Una tarea solo vencida pero aún realizable es "mantener";
+  "duplicada" si es la misma tarea que otra de la lista.
+- duplicateOf: si es "duplicada", el código de la tarea que se queda (la más completa); si no, cadena vacía. Nunca dos tareas duplicadas entre sí: una se queda con "mantener".
+- reason: explicación muy breve.
+${DATA_ONLY_NOTICE.replace('<chats> y </chats>', 'los "mensajes de origen"')}
+
+Tareas:
+${list}`;
+}
+
+// ---------- Auditoría de calidad (solo lectura) ----------
+// Repite los análisis sobre los últimos días con los mismos prompts y filtros, sin guardar ni enviar nada,
+// y deja en el registro cada decisión para poder revisar si se detecta bien lo importante.
+// Se lanza una vez si el despliegue trae el archivo audit/run.flag.
+
+const AUDIT_FLAG = path.join(__dirname, 'audit', 'run.flag');
+const AUDIT_LEVELS = [GEMINI_THINKING_LEVEL];
+let auditStarted = false;
+
+const oneLine = (text, max) => clip(String(text || '').replace(/\s+/g, ' ').trim(), max);
+
+function auditChatList(contextText) {
+    return contextText.split('--- CHAT: ').slice(1).map(block => {
+        const name = block.slice(0, block.indexOf(' (ID:'));
+        const lines = (block.split('Mensajes nuevos:\n')[1] || '').split('\n').filter(Boolean).length;
+        return `${name} (${lines} msj)`;
+    });
+}
+
+async function runAudit() {
+    const log = (line) => console.log(`[auditoría] ${line}`);
+    log(`===== INICIO ${nowDescription()} (no se guarda ni se envía nada) =====`);
+
+    // 1. Tareas: últimos 7 días completos, ignorando hasta dónde se analizó
+    const tasksRead = await readNewMessages('tasks', { full: true });
+    log(`Tareas | chats leídos (${Object.keys(tasksRead.meta).length}): ${auditChatList(tasksRead.contextText).join(' · ')}`);
+    if (tasksRead.contextText) {
+        for (const level of AUDIT_LEVELS) {
+            const { prompt, byShortId } = taskPrompt(tasksRead.contextText);
+            const raw = await askGeminiForArray(prompt, TASK_ITEM_SCHEMA, { thinkingLevel: level });
+            const candidates = dedupCandidates();
+            const totals = {};
+            log(`Tareas ${level} | ${raw.length} candidatas:`);
+            for (const t of raw) {
+                if (!t || !t.text) continue;
+                let decision = taskRejection(t);
+                if (!decision) {
+                    const probe = newTask(t);
+                    const same = byShortId.get(String(t.existingTaskId || '').trim().replace(/[\[\]]/g, ''))
+                        || findDuplicate(probe, candidates.current);
+                    if (same) decision = `yaExistia[${shortId(same.id)}]`;
+                    else if (findDuplicate(probe, candidates.archived)) decision = 'descartadaAntes';
+                    else decision = 'NUEVA';
+                }
+                const key = decision.replace(/\[.*/, '');
+                totals[key] = (totals[key] || 0) + 1;
+                const chat = (tasksRead.meta[t.sourceId] && tasksRead.meta[t.sourceId].name) || t.sourceName || '?';
+                log(`  ${decision} | ${oneLine(chat, 40)} | ${t.owner}/${t.kind || '-'} conf ${t.confidence}`
+                    + ` | vence ${t.deadline || '-'} | ${oneLine(t.text, 140)} | "${oneLine(t.quote, 120)}"`);
+            }
+            log(`Tareas ${level} | totales: ${JSON.stringify(totals)}`);
+        }
+    }
+
+    // 2. Resumen: últimos 2 días completos
+    const sumRead = await readNewMessages('summary', { full: true });
+    log(`Resumen | chats con novedades (${Object.keys(sumRead.meta).length}): ${auditChatList(sumRead.contextText).join(' · ')}`);
+    if (sumRead.contextText) {
+        const sinceSec = nowSec() - FIRST_LOOKBACK_DAYS.summary * DAY;
+        for (const level of AUDIT_LEVELS) {
+            const raw = await askGeminiForArray(summaryPrompt(sumRead.contextText, sinceSec), SUMMARY_ITEM_SCHEMA, { thinkingLevel: level });
+            log(`Resumen ${level} | ${raw.length} destacados:`);
+            raw.forEach((i, n) => {
+                const chat = (sumRead.meta[i.sourceId] && sumRead.meta[i.sourceId].name) || `${i.chatName} (ID no válido)`;
+                log(`  ${n + 1}. ${oneLine(chat, 40)} | ${i.reason}${i.deadline ? ' ' + i.deadline : ''} | ${oneLine(i.summaryText, 220)}`);
+            });
+        }
+    }
+
+    // 3. Tareas pendientes guardadas: fechas y lo que haría la revisión (sin quitar nada)
+    const pending = store.data.tasks.filter(t => !t.completed);
+    const overdue = pending.filter(t => t.deadline && daysUntil(t.deadline) < 0);
+    log(`Pendientes: ${pending.length} (${overdue.length} vencidas, ${pending.filter(t => !t.deadline).length} sin fecha)`);
+    for (const t of pending) {
+        const created = new Date(t.createdAt || Date.now()).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
+        const due = t.deadline ? `vence ${t.deadline} (${daysUntil(t.deadline)} d)` : 'sin fecha';
+        log(`  [${shortId(t.id)}] ${due} | creada ${created} | ${oneLine(t.sourceName, 40)} | ${oneLine(t.text, 140)}`);
+    }
+    if (pending.length > 0) {
+        const raw = await askGeminiForArray(reviewPrompt(pending), REVIEW_ITEM_SCHEMA);
+        const totals = {};
+        for (const r of raw) {
+            totals[r.verdict] = (totals[r.verdict] || 0) + 1;
+            if (r.verdict !== 'mantener') log(`  revisión: [${String(r.id).replace(/[\[\]]/g, '')}] ${r.verdict}${r.duplicateOf ? ' de ' + r.duplicateOf : ''} | ${oneLine(r.reason, 160)}`);
+        }
+        log(`Revisión (simulada) | ${JSON.stringify(totals)}`);
+    }
+
+    log('===== FIN =====');
+}
+
+// Lanza la auditoría una sola vez por cada archivo audit/run.flag distinto
+function maybeScheduleAudit() {
+    if (auditStarted || !fs.existsSync(AUDIT_FLAG)) return;
+    let flagId;
+    try {
+        flagId = fs.readFileSync(AUDIT_FLAG, 'utf8').trim() || 'sin-id';
+    } catch (e) {
+        return;
+    }
+    if (!Array.isArray(store.data.auditsDone)) store.data.auditsDone = [];
+    if (store.data.auditsDone.includes(flagId)) return;
+
+    auditStarted = true;
+    console.log('[auditoría] Programada para dentro de 3 minutos.');
+    setTimeout(async () => {
+        store.data.auditsDone.push(flagId);
+        store.save();
+        try {
+            fs.unlinkSync(AUDIT_FLAG);
+        } catch (e) {
+            // Si no se puede borrar, el registro en auditsDone evita repetirla
+        }
+        try {
+            await runAudit();
+        } catch (e) {
+            console.error('[auditoría] Falló:', describeAiError(e));
+        }
+        // "rescan" en el archivo: además, volver a buscar tareas de verdad en los últimos 7 días
+        if (/rescan/.test(flagId)) {
+            try {
+                const { added } = await runTaskExtraction({ full: true });
+                for (const t of added) {
+                    console.log(`[auditoría] Añadida: ${oneLine(t.text, 140)} | ${oneLine(t.sourceName, 40)} | vence ${t.deadline || '-'}`);
+                }            } catch (e) {
+                console.error('[auditoría] Falló la nueva búsqueda de tareas:', describeAiError(e));
+            }
+        }
+    }, 3 * 60 * 1000);
 }
 
 // ---------- Mensajes a tu propio WhatsApp ----------
@@ -2024,11 +2321,10 @@ app.get('/api/resumen', (req, res) => {
     res.json({ success: true, lastSummary: store.data.lastSummary, lastRun: store.data.lastRun.summary ? store.data.lastRun.summary * 1000 : null });
 });
 
-// Generar resumen de lo nuevo desde la última vez (full: true = últimos 2 días completos)
+// Resumen del panel: tus chats con actividad más reciente, ordenados por importancia
 app.post('/api/resumen', requireWhatsApp, async (req, res) => {
     try {
-        const full = !!(req.body && req.body.full);
-        const result = await runSummary({ full });
+        const result = await runPanelSummary();
 
         if (result.items.length > 0 && store.data.settings.sendManualSummary) {
             const title = result.items.length === 1 ? 'Lo más importante' : `Lo más importante (${result.items.length} chats)`;
@@ -2355,6 +2651,23 @@ function cleanDuplicateTasks() {
     console.log(`Tareas repetidas fusionadas: ${removed}. Copia de seguridad: ${backup}`);
 }
 
+// Cambios de configuración que se aplican una sola vez a los datos ya guardados
+function applyOneTimeMigrations() {
+    if (!Array.isArray(store.data.migrations)) store.data.migrations = [];
+    const done = new Set(store.data.migrations);
+    let changed = false;
+
+    // "Ver novedades" en el panel ya no envía el resumen a tu WhatsApp (se puede reactivar en Recordatorios)
+    if (!done.has('panel-summary-no-whatsapp')) {
+        store.data.settings.sendManualSummary = false;
+        store.data.migrations.push('panel-summary-no-whatsapp');
+        changed = true;
+        console.log('Ajuste aplicado: los resúmenes del panel ya no se envían a WhatsApp.');
+    }
+
+    if (changed) store.save();
+}
+
 // Importación de una sola vez: si el despliegue trae import/tareas-importar.json (tareas de otra copia de la app),
 // se añaden sin duplicar, se recuerda que ya se importó y el archivo se borra del servidor.
 const IMPORT_FILE = path.join(__dirname, 'import', 'tareas-importar.json');
@@ -2436,6 +2749,7 @@ store.init()
         return { backend: 'archivo' };
     })
     .then((result) => {
+        applyOneTimeMigrations();
         importTasksFile();
         cleanDuplicateTasks();
         server.listen(...listenArgs, () => {

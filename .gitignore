@@ -29,3 +29,6 @@ Desktop.ini
 
 # Importaciones de una sola vez (contienen texto de tus chats)
 import/
+
+# Archivo para lanzar la auditoría una vez en el servidor
+audit/
