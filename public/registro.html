@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>WA Automator: usuarios</title>
+    <link rel="stylesheet" href="/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .reg-page { min-height: 100vh; display: flex; justify-content: center; padding: 2.5rem 1rem; background: var(--bg-main); }
+        .reg-wrap { width: 100%; max-width: 520px; }
+        .reg-back { display: inline-flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); text-decoration: none; margin-bottom: 1rem; }
+        .reg-back:hover { color: var(--primary); }
+        .reg-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 14px; padding: 1.75rem; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        .reg-card + .reg-card { margin-top: 1.25rem; }
+        .reg-card h1 { font-size: 1.35rem; margin-bottom: 0.35rem; }
+        .reg-card h2 { font-size: 1.05rem; margin-bottom: 0.9rem; }
+        .reg-sub { color: var(--text-secondary); font-size: 0.92rem; margin-bottom: 1.4rem; }
+        .reg-banner { background: var(--primary-light); color: #065f46; border-radius: 10px; padding: 0.8rem 1rem; font-size: 0.9rem; margin-bottom: 1.25rem; }
+        .field { margin-bottom: 1rem; }
+        .hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.3rem; }
+        .pw-row { display: flex; gap: 6px; }
+        .pw-row .login-input { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; }
+        .icon-btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
+            height: 42px; min-width: 42px; padding: 0 0.7rem; border-radius: 8px;
+            border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-secondary);
+            font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+        }
+        .icon-btn:hover { border-color: var(--primary); color: var(--primary); }
+        .icon-btn.gen { background: var(--primary-light); border-color: transparent; color: #065f46; }
+        .icon-btn.gen:hover { background: #a7f3d0; color: #064e3b; }
+        .icon-btn svg { width: 18px; height: 18px; }
+        .meter { height: 6px; border-radius: 3px; background: #e5e7eb; margin-top: 0.55rem; overflow: hidden; }
+        .meter span { display: block; height: 100%; width: 0; border-radius: 3px; transition: width .2s, background-color .2s; }
+        .meter-row { display: flex; justify-content: space-between; font-size: 0.8rem; margin-top: 0.3rem; color: var(--text-muted); }
+        .meter-label { font-weight: 600; }
+        .rules { list-style: none; display: grid; gap: 4px; margin-top: 0.6rem; font-size: 0.82rem; color: var(--text-muted); }
+        .rules li { display: flex; align-items: center; gap: 6px; }
+        .rules li::before { content: ''; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #d1d5db; flex-shrink: 0; }
+        .rules li.ok { color: #047857; }
+        .rules li.ok::before { border-color: var(--primary); background: var(--primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='4'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='m4.5 12.75 6 6 9-13.5'/%3E%3C/svg%3E") center / 9px no-repeat; }
+        .copy-note { font-size: 0.82rem; color: #b45309; background: #fef3c7; border-radius: 8px; padding: 0.55rem 0.75rem; margin-top: 0.6rem; }
+        .reg-ok { min-height: 1.4rem; margin: 0.6rem 0; color: #047857; font-size: 0.9rem; }
+        .user-list { list-style: none; }
+        .user-item { display: flex; align-items: center; gap: 12px; padding: 0.75rem 0; }
+        .user-item + .user-item { border-top: 1px solid var(--border-color); }
+        .user-avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-light); color: var(--primary); font-weight: 700; flex-shrink: 0; text-transform: uppercase; }
+        .user-avatar.admin { background: #f3f4f6; color: var(--text-secondary); }
+        .user-info { flex: 1; min-width: 0; }
+        .user-name { font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .user-meta { font-size: 0.8rem; color: var(--text-muted); }
+        .badge-me { font-size: 0.7rem; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--primary-light); color: #065f46; }
+        .del-btn { border: 1px solid var(--border-color); background: none; color: var(--text-secondary); border-radius: 8px; padding: 0.4rem 0.7rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+        .del-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+        @media (max-width: 520px) {
+            .reg-page { padding: 1.25rem 1rem; }
+            .reg-card { padding: 1.25rem; }
+            .pw-row { flex-wrap: wrap; }
+            .pw-row .login-input { flex-basis: 100%; }
+            .icon-btn.gen { flex: 1; }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="reg-page">
+        <div class="reg-wrap">
+            <a href="/panel" class="reg-back">
+                <svg class="ico" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="16" height="16" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+                Volver al panel
+            </a>
+
+            <form class="reg-card" id="reg-form" autocomplete="off" novalidate>
+                <h1>Crear usuario</h1>
+                <p class="reg-sub">Cada usuario puede entrar al panel con su propia contraseña. Todos ven el mismo WhatsApp.</p>
+                <div id="first-banner" class="reg-banner hidden">Has entrado con el acceso de emergencia. Crea tu usuario y, a partir de ahora, entra con él.</div>
+
+                <div class="field">
+                    <label for="reg-username" class="login-label">Usuario</label>
+                    <input type="text" id="reg-username" class="login-input" autocomplete="username" autocapitalize="none"
+                        autocorrect="off" spellcheck="false" maxlength="32" required>
+                    <div class="hint">De 3 a 32 caracteres: minúsculas, números, punto, guion o guion bajo.</div>
+                </div>
+
+                <div class="field">
+                    <label for="reg-password" class="login-label">Contraseña</label>
+                    <div class="pw-row">
+                        <input type="password" id="reg-password" class="login-input" autocomplete="new-password" maxlength="128" required>
+                        <button type="button" class="icon-btn" id="btn-toggle" title="Mostrar contraseña" aria-label="Mostrar contraseña">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
+                        </button>
+                        <button type="button" class="icon-btn" id="btn-copy" title="Copiar contraseña" aria-label="Copiar contraseña">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
+                        </button>
+                        <button type="button" class="icon-btn gen" id="btn-generate" title="Generar una contraseña segura">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" /></svg>
+                            Generar
+                        </button>
+                    </div>
+                    <div class="meter" aria-hidden="true"><span id="meter-bar"></span></div>
+                    <div class="meter-row"><span>Seguridad</span><span class="meter-label" id="meter-label">—</span></div>
+                    <ul class="rules" id="rules">
+                        <li data-rule="length">Al menos <span id="min-len">12</span> caracteres</li>
+                        <li data-rule="mix">3 tipos de caracteres (o 16 caracteres o más)</li>
+                        <li data-rule="user">No contiene el nombre de usuario</li>
+                    </ul>
+                    <div id="copy-note" class="copy-note hidden">Guarda esta contraseña en tu gestor de contraseñas antes de crear el usuario: después no se puede volver a ver.</div>
+                </div>
+
+                <div class="field">
+                    <label for="reg-confirm" class="login-label">Repite la contraseña</label>
+                    <input type="password" id="reg-confirm" class="login-input" autocomplete="new-password" maxlength="128" required>
+                </div>
+
+                <div id="reg-error" class="login-error" role="alert"></div>
+                <div id="reg-ok" class="reg-ok" role="status"></div>
+
+                <button type="submit" class="btn-primary login-button" id="reg-button">Crear usuario</button>
+            </form>
+
+            <section class="reg-card">
+                <h2>Usuarios</h2>
+                <ul class="user-list" id="user-list"></ul>
+            </section>
+        </div>
+    </div>
+
+    <script src="/registro.js"></script>
+</body>
+
+</html>

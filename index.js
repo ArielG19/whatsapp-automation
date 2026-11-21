@@ -110,7 +110,10 @@ app.get('/api/session', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, authRequired: auth.required, authenticated: auth.isAuthenticated(req) });
 });
-app.post('/api/login', (req, res) => auth.login(req, res));
+app.post('/api/login', (req, res) => auth.login(req, res).catch((e) => {
+    console.error('Error al iniciar sesión:', e);
+    res.status(500).json({ success: false, error: 'No se pudo iniciar sesión.' });
+}));
 app.post('/api/panel-logout', (req, res) => auth.logout(req, res));
 
 // Lo único visible sin iniciar sesión: la portada, la página de acceso y sus estilos
@@ -137,6 +140,21 @@ app.get(['/panel', '/panel/'], (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.sendFile(path.join(PUBLIC_DIR, 'panel.html'));
 });
+
+// Usuarios del panel: alta y baja solo con sesión iniciada (el registro no es público)
+app.get(['/registro', '/registro/'], (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(path.join(PUBLIC_DIR, 'registro.html'));
+});
+app.get('/api/users', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, users: auth.publicUsers(), me: auth.currentUser(req), minPasswordLength: auth.MIN_PASSWORD_LENGTH });
+});
+app.post('/api/users', (req, res) => auth.createUser(req, res).catch((e) => {
+    console.error('Error al crear usuario:', e);
+    res.status(500).json({ success: false, error: 'No se pudo crear el usuario.' });
+}));
+app.delete('/api/users/:username', (req, res) => auth.deleteUser(req, res));
 app.use(express.static(PUBLIC_DIR, { index: false }));
 
 // Inicializar IA

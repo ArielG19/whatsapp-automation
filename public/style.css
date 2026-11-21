@@ -369,6 +369,8 @@ button {
 }
 .logout-btn:hover { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
 .logout-btn:disabled { opacity: 0.6; cursor: wait; }
+a.logout-btn { text-decoration: none; }
+.logout-btn.neutral:hover { background: var(--primary-light); color: var(--primary); border-color: transparent; }
 
 /* Avisos dentro de una vista */
 .notice {

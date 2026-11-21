@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
     <title>WA Automator: acceso</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 
@@ -14,11 +14,15 @@
     <div class="auth-layout">
         <form class="auth-card" id="login-form" autocomplete="on">
             <h2>WA Automator</h2>
-            <p style="color: #64748b; margin-bottom: 1.5rem;">Escribe la contraseña del panel para entrar</p>
+            <p style="color: #64748b; margin-bottom: 1.5rem;">Entra con tu usuario y contraseña</p>
 
-            <label for="password" class="login-label">Contraseña</label>
+            <label for="username" class="login-label">Usuario</label>
+            <input type="text" id="username" name="username" class="login-input" autocomplete="username"
+                autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+
+            <label for="password" class="login-label" style="margin-top: 0.9rem;">Contraseña</label>
             <input type="password" id="password" name="password" class="login-input" autocomplete="current-password"
-                required autofocus>
+                required>
 
             <div id="login-error" class="login-error" role="alert"></div>
 
@@ -26,7 +30,7 @@
         </form>
     </div>
 
-    <script src="login.js"></script>
+    <script src="/login.js"></script>
 </body>
 
 </html>

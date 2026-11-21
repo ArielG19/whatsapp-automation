@@ -153,9 +153,13 @@ btnLogout.addEventListener('click', async () => {
 
 // --- SALIR DEL PANEL (solo cuando el panel tiene contraseña) ---
 const btnPanelLogout = document.getElementById('btn-panel-logout');
+const btnUsers = document.getElementById('btn-users');
 
 nativeFetch('/api/session').then(r => r.json()).then(data => {
-    if (data.authRequired) btnPanelLogout.classList.remove('hidden');
+    if (data.authRequired) {
+        btnPanelLogout.classList.remove('hidden');
+        btnUsers.classList.remove('hidden');
+    }
 }).catch(() => {});
 
 btnPanelLogout.addEventListener('click', async () => {
