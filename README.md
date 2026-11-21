@@ -35,7 +35,7 @@ Abre `http://localhost:3000/panel` y escanea el código QR con WhatsApp (Disposi
 
 - **En tu ordenador** el panel solo escucha en `127.0.0.1`. La contraseña (`PANEL_PASSWORD`) es opcional.
 - **En un servidor** la contraseña es obligatoria (mínimo 10 caracteres): sin ella la app muestra una página de aviso y no conecta WhatsApp. El acceso usa una cookie de sesión `HttpOnly`, se bloquea tras 5 intentos fallidos durante 15 minutos y solo acepta peticiones del propio dominio por HTTPS.
-- **Usuarios:** se entra con usuario y contraseña. La primera vez entra con el usuario `admin` y la contraseña de `PANEL_PASSWORD`, y crea tu usuario en `/registro` (con generador de contraseñas seguras). Las contraseñas se guardan solo como hash scrypt en la tabla `users`. El registro no es público: solo se puede crear un usuario con la sesión iniciada. `admin` queda como acceso de emergencia.
+- **Usuarios:** se entra con usuario y contraseña. La primera vez entra con el usuario `admin` y la contraseña de `PANEL_PASSWORD`, y crea tu usuario en `/registro` (con generador de contraseñas seguras). Solo se permite **un usuario**, porque el panel está vinculado a un único WhatsApp. Las contraseñas se guardan solo como hash scrypt en la tabla `users`. El registro no es público: solo se puede crear con la sesión iniciada y mientras no exista ya la cuenta. `admin` queda como acceso de emergencia.
 - Los comandos de WhatsApp solo se obedecen si los escribes tú en tu propio chat.
 - No se suben al repositorio: `.env` (claves y contraseñas), `.wwebjs_auth/` (sesión de WhatsApp: quien la tenga entra en tu cuenta), `data/` (tareas y resúmenes con texto de tus chats) ni `import/`.
 - `whatsapp-web.js` no es una API oficial de WhatsApp: úsalo con moderación.

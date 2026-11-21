@@ -16,7 +16,9 @@ const userList = document.getElementById('user-list');
 const firstBanner = document.getElementById('first-banner');
 
 let minLength = 12;
+let maxUsers = 1;
 let me = null;
+const accountDone = document.getElementById('account-done');
 
 function escapeHtml(value) {
     return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -198,6 +200,10 @@ function formatDate(ms) {
 
 function renderUsers(users) {
     firstBanner.classList.toggle('hidden', !(me === 'admin' && users.length === 0));
+    // Con la cuenta ya creada no se puede registrar nadie más
+    const full = users.length >= maxUsers;
+    form.classList.toggle('hidden', full);
+    accountDone.classList.toggle('hidden', !full);
     const rows = users.map(u => `
         <li class="user-item">
             <div class="user-avatar">${escapeHtml(u.username.charAt(0))}</div>
@@ -224,8 +230,8 @@ userList.addEventListener('click', async (e) => {
     const username = btn.dataset.user;
     const self = username === me;
     const question = self
-        ? `¿Eliminar tu propio usuario "${username}"? Se cerrará tu sesión.`
-        : `¿Eliminar el usuario "${username}"? Ya no podrá entrar al panel.`;
+        ? `¿Eliminar tu usuario "${username}"? Se cerrará tu sesión y tendrás que entrar con admin para crear uno nuevo.`
+        : `¿Eliminar el usuario "${username}"? Ya no podrá entrar al panel y podrás crear uno nuevo.`;
     if (!confirm(question)) return;
 
     btn.disabled = true;
@@ -250,6 +256,7 @@ async function loadUsers() {
         if (!data.success) return;
         me = data.me;
         minLength = data.minPasswordLength || minLength;
+        maxUsers = data.maxUsers || maxUsers;
         document.getElementById('min-len').textContent = minLength;
         renderUsers(data.users);
     } catch (e) {

@@ -148,7 +148,7 @@ app.get(['/registro', '/registro/'], (req, res) => {
 });
 app.get('/api/users', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ success: true, users: auth.publicUsers(), me: auth.currentUser(req), minPasswordLength: auth.MIN_PASSWORD_LENGTH });
+    res.json({ success: true, users: auth.publicUsers(), me: auth.currentUser(req), minPasswordLength: auth.MIN_PASSWORD_LENGTH, maxUsers: auth.MAX_USERS });
 });
 app.post('/api/users', (req, res) => auth.createUser(req, res).catch((e) => {
     console.error('Error al crear usuario:', e);

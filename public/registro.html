@@ -74,8 +74,8 @@
             </a>
 
             <form class="reg-card" id="reg-form" autocomplete="off" novalidate>
-                <h1>Crear usuario</h1>
-                <p class="reg-sub">Cada usuario puede entrar al panel con su propia contraseña. Todos ven el mismo WhatsApp.</p>
+                <h1>Crear tu usuario</h1>
+                <p class="reg-sub">Con este usuario entrarás al panel. Solo puede haber uno, porque el panel está vinculado a tu WhatsApp.</p>
                 <div id="first-banner" class="reg-banner hidden">Has entrado con el acceso de emergencia. Crea tu usuario y, a partir de ahora, entra con él.</div>
 
                 <div class="field">
@@ -121,8 +121,13 @@
                 <button type="submit" class="btn-primary login-button" id="reg-button">Crear usuario</button>
             </form>
 
+            <section class="reg-card hidden" id="account-done">
+                <h1>Tu cuenta ya está creada</h1>
+                <p class="reg-sub" style="margin-bottom: 0;">El panel solo admite un usuario, porque está vinculado a un único WhatsApp: nadie más puede registrarse. Si olvidas tu contraseña, entra con <b>admin</b> y la contraseña del servidor, elimina tu usuario y créalo de nuevo.</p>
+            </section>
+
             <section class="reg-card">
-                <h2>Usuarios</h2>
+                <h2>Acceso al panel</h2>
                 <ul class="user-list" id="user-list"></ul>
             </section>
         </div>
