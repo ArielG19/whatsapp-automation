@@ -10,11 +10,19 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         .reg-page { min-height: 100vh; display: flex; justify-content: center; padding: 2.5rem 1rem; background: var(--bg-main); }
-        .reg-wrap { width: 100%; max-width: 520px; }
+        .reg-wrap { width: 100%; max-width: 1040px; }
+        .reg-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+        .reg-col { display: grid; gap: 1.25rem; min-width: 0; }
+        .tips { list-style: none; display: grid; gap: 0.75rem; font-size: 0.88rem; color: var(--text-secondary); }
+        .tips li { display: flex; gap: 10px; }
+        .tips svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--primary); margin-top: 1px; }
+        @media (max-width: 900px) {
+            .reg-wrap { max-width: 560px; }
+            .reg-grid { grid-template-columns: 1fr; }
+        }
         .reg-back { display: inline-flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); text-decoration: none; margin-bottom: 1rem; }
         .reg-back:hover { color: var(--primary); }
         .reg-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 14px; padding: 1.75rem; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-        .reg-card + .reg-card { margin-top: 1.25rem; }
         .reg-card h1 { font-size: 1.35rem; margin-bottom: 0.35rem; }
         .reg-card h2 { font-size: 1.05rem; margin-bottom: 0.9rem; }
         .reg-sub { color: var(--text-secondary); font-size: 0.92rem; margin-bottom: 1.4rem; }
@@ -65,7 +73,7 @@
     </style>
 </head>
 
-<body>
+<body class="page-scroll">
     <div class="reg-page">
         <div class="reg-wrap">
             <a href="/panel" class="reg-back">
@@ -73,6 +81,8 @@
                 Volver al panel
             </a>
 
+            <div class="reg-grid">
+            <div class="reg-col">
             <form class="reg-card" id="reg-form" autocomplete="off" novalidate>
                 <h1>Crear tu usuario</h1>
                 <p class="reg-sub">Con este usuario entrarás al panel. Solo puede haber uno, porque el panel está vinculado a tu WhatsApp.</p>
@@ -125,11 +135,24 @@
                 <h1>Tu cuenta ya está creada</h1>
                 <p class="reg-sub" style="margin-bottom: 0;">El panel solo admite un usuario, porque está vinculado a un único WhatsApp: nadie más puede registrarse. Si olvidas tu contraseña, entra con <b>admin</b> y la contraseña del servidor, elimina tu usuario y créalo de nuevo.</p>
             </section>
+            </div>
 
-            <section class="reg-card">
-                <h2>Acceso al panel</h2>
-                <ul class="user-list" id="user-list"></ul>
-            </section>
+            <aside class="reg-col">
+                <section class="reg-card">
+                    <h2>Acceso al panel</h2>
+                    <ul class="user-list" id="user-list"></ul>
+                </section>
+
+                <section class="reg-card">
+                    <h2>Consejos</h2>
+                    <ul class="tips">
+                        <li><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" /></svg><span>Pulsa <b>Generar</b> para crear una contraseña aleatoria de 20 caracteres.</span></li>
+                        <li><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" /></svg><span>Guárdala en tu gestor de contraseñas (el del navegador o uno como Bitwarden) antes de crear el usuario.</span></li>
+                        <li><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg><span>No la compartas ni la envíes por chat o en capturas de pantalla.</span></li>
+                    </ul>
+                </section>
+            </aside>
+            </div>
         </div>
     </div>
 

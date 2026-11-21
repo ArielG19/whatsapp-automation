@@ -28,9 +28,13 @@ body {
     overflow: hidden;
 }
 
+/* Páginas sueltas (acceso, registro): a diferencia del panel, deben poder desplazarse */
+body.page-scroll { overflow: auto; }
+
 /* Auth Layout */
 .auth-layout {
-    height: 100vh;
+    min-height: 100vh;
+    padding: 1rem;
     display: flex;
     justify-content: center;
     align-items: center;
