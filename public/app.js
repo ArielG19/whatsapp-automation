@@ -432,12 +432,17 @@ function renderSummaryCards(summary) {
 
     let html = '';
     const parts = [];
-    if (summary.mode === 'recent') parts.push(`Tus ${summary.items.length} chats más recientes e importantes`);
+    if (summary.mode === 'recent') parts.push(`Tus ${summary.items.length} chats más importantes, del más reciente al más antiguo`);
     else if (summary.since) parts.push(`Novedades desde ${formatDateTime(summary.since)}`);
     if (summary.generatedAt) parts.push(`generado ${formatDateTime(summary.generatedAt)}`);
     if (parts.length) html += `<div class="summary-generated">${escapeHtml(parts.join(' · '))}</div>`;
 
-    summary.items.forEach(item => {
+    // Más recientes primero (los resúmenes antiguos sin fecha conservan su orden)
+    const items = summary.items.every(i => i.lastMessageAt)
+        ? [...summary.items].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+        : summary.items;
+
+    items.forEach(item => {
         const linkUrl = safeLink(item.link, item.sourceId);
         const linkLabel = (isDirectLink(linkUrl) ? 'Ver conversación' : 'Abrir WhatsApp Web') + ICONS.chevron;
 
@@ -547,28 +552,25 @@ tabBtns.forEach(btn => {
 });
 
 const VALID_URGENCIES = ['alta', 'media', 'baja'];
-const URGENCY_RANK = { alta: 0, media: 1, baja: 2 };
 
-// Pendientes: primero las vencidas (la más antigua arriba), luego por urgencia,
-// dentro de cada urgencia por fecha límite (las que no tienen fecha al final) y por último las más nuevas.
+// Cuándo llegó la tarea: la hora del mensaje del que sale o, si no se sabe, cuándo se detectó
+const taskDate = (t) => t.messageAt || t.createdAt || 0;
+
+// Pendientes: las más recientes primero
 function compareTasks(a, b) {
-    const da = daysUntil(a.deadline);
-    const db = daysUntil(b.deadline);
-    const overdueA = da !== null && da < 0;
-    const overdueB = db !== null && db < 0;
-    if (overdueA !== overdueB) return overdueA ? -1 : 1;
-    if (overdueA && overdueB) return da - db;
+    return taskDate(b) - taskDate(a);
+}
 
-    const ua = URGENCY_RANK[a.urgency] ?? 1;
-    const ub = URGENCY_RANK[b.urgency] ?? 1;
-    if (ua !== ub) return ua - ub;
-
-    if (da !== db) {
-        if (da === null) return 1;
-        if (db === null) return -1;
-        return da - db;
-    }
-    return (b.createdAt || 0) - (a.createdAt || 0);
+function formatShortDate(ms) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const time = d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    if (d.toDateString() === today.toDateString()) return `hoy ${time}`;
+    if (d.toDateString() === yesterday.toDateString()) return `ayer ${time}`;
+    return `${d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })} ${time}`;
 }
 
 // "Vence hoy", "Vence mañana", "Venció el 10/11"... a partir de una fecha AAAA-MM-DD
@@ -628,6 +630,7 @@ function renderTasks() {
                         <span class="task-urgency urgency-${urgency}">${escapeHtml(urgency)}</span>
                         ${renderDeadline(task.deadline, task.completed)}
                         <span>Origen: ${escapeHtml(task.sourceName || 'Desconocido')}</span>
+                        ${taskDate(task) ? `<span class="task-date" title="${task.messageAt ? 'Fecha del mensaje' : 'Fecha en que se detectó'}">${escapeHtml(formatShortDate(taskDate(task)))}</span>` : ''}
                         ${linkHtml}
                     </div>
                 </div>

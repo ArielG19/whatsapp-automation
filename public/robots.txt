@@ -1,0 +1,8 @@
+# Solo la portada es pública. El panel y el acceso son privados.
+User-agent: *
+Allow: /$
+Allow: /brand/
+Disallow: /panel
+Disallow: /login
+Disallow: /registro
+Disallow: /api/

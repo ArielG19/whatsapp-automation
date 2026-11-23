@@ -4,9 +4,53 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WA Automator</title>
-    <meta name="description" content="Proyecto personal que usa IA para convertir tus conversaciones de WhatsApp en resúmenes, tareas organizadas y recordatorios automáticos.">
+    <title>WA Automator · Tu WhatsApp, más inteligente</title>
+    <meta name="description" content="Resúmenes de tus chats, tareas con fecha y recordatorios automáticos: WA Automator usa inteligencia artificial para convertir tus conversaciones de WhatsApp en información útil.">
     <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#059669">
+    <link rel="canonical" href="https://whatsapp.ia-automator.com/">
+
+    <!-- Iconos -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48">
+    <link rel="icon" href="/brand/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+    <link rel="manifest" href="/site.webmanifest">
+
+    <!-- Vista previa al compartir el enlace (WhatsApp, Telegram, Facebook, LinkedIn...) -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="WA Automator">
+    <meta property="og:locale" content="es_ES">
+    <meta property="og:url" content="https://whatsapp.ia-automator.com/">
+    <meta property="og:title" content="WA Automator · Tu WhatsApp, más inteligente">
+    <meta property="og:description" content="Resúmenes de tus chats, tareas con fecha y recordatorios automáticos con inteligencia artificial.">
+    <meta property="og:image" content="https://whatsapp.ia-automator.com/brand/og-image.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="WA Automator: Tu WhatsApp, más inteligente. Resumen de chats, tareas, recordatorios y modo ocupado.">
+
+    <!-- X (Twitter) -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="WA Automator · Tu WhatsApp, más inteligente">
+    <meta name="twitter:description" content="Resúmenes de tus chats, tareas con fecha y recordatorios automáticos con inteligencia artificial.">
+    <meta name="twitter:image" content="https://whatsapp.ia-automator.com/brand/og-image.png">
+    <meta name="twitter:image:alt" content="WA Automator: Tu WhatsApp, más inteligente.">
+
+    <!-- Datos estructurados para buscadores -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "WA Automator",
+        "url": "https://whatsapp.ia-automator.com/",
+        "applicationCategory": "ProductivityApplication",
+        "operatingSystem": "Web",
+        "description": "Resúmenes de chats, tareas con fecha y recordatorios automáticos con inteligencia artificial.",
+        "inLanguage": "es",
+        "email": "info@ia-automator.com",
+        "image": "https://whatsapp.ia-automator.com/brand/og-image.png"
+    }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -252,6 +296,18 @@
         .credit a:hover { text-decoration: underline; }
         .disclaimer { margin-top: 18px; font-size: .78rem; color: var(--text-3); }
 
+        .contact { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+        .contact-btn {
+            display: inline-flex; align-items: center; gap: 10px;
+            background: var(--primary); color: #fff; text-decoration: none; font-weight: 600;
+            padding: 14px 22px; border-radius: 12px; font-size: 1rem; word-break: break-all;
+            transition: background-color .15s;
+        }
+        .contact-btn:hover { background: var(--primary-strong); }
+        :root[data-theme="dark"] .contact-btn { color: #04241a; }
+        @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .contact-btn { color: #04241a; } }
+        @media (max-width: 640px) { .contact-btn { width: 100%; justify-content: center; } }
+
         @media (max-width: 960px) {
             .cols { grid-template-columns: 1fr 1fr; }
             .col:nth-child(3) { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--border); }
@@ -482,6 +538,20 @@
                 </ul>
             </div>
         </section>
+
+        <section class="section" id="contacto">
+            <div class="wrap contact">
+                <div>
+                    <span class="kicker">Contacto</span>
+                    <h2>¿Preguntas o sugerencias?</h2>
+                    <p class="section-lead">Si te interesa el proyecto, tienes una idea o quieres saber más, escríbenos.</p>
+                </div>
+                <a class="contact-btn" href="mailto:info@ia-automator.com">
+                    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
+                    info@ia-automator.com
+                </a>
+            </div>
+        </section>
     </main>
 
     <footer>
@@ -495,7 +565,7 @@
                     <span class="chip">Socket.IO</span>
                     <span class="chip">MySQL</span>
                 </div>
-                <p class="credit">Desarrollado por <a href="https://github.com/ArielG19/whatsapp-automation" target="_blank" rel="noopener">ArielG19</a></p>
+                <p class="credit"><a href="mailto:info@ia-automator.com">info@ia-automator.com</a> · Desarrollado por <a href="https://github.com/ArielG19/whatsapp-automation" target="_blank" rel="noopener">ArielG19</a></p>
             </div>
             <p class="disclaimer">Proyecto personal sin fines comerciales. No está afiliado ni respaldado por WhatsApp ni por Meta.</p>
         </div>

@@ -1,6 +1,9 @@
 require('dotenv').config();
 // La configuración se carga primero: fija la zona horaria antes de usar fechas
 const config = require('./lib/config');
+// En el alojamiento hay una copia de la app por dominio: si otra ya tiene WhatsApp, esta solo le reenvía el tráfico
+const instance = require('./lib/instance');
+if (instance.runAsRelayIfSecondary()) return;
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { GoogleGenAI, Type, ThinkingLevel } = require('@google/genai');
 const express = require('express');
@@ -30,6 +33,11 @@ const ALLOWED_HOSTS = new Set(config.HOSTED
 const ALLOWED_ORIGINS = new Set(config.HOSTED
     ? config.DOMAINS.map(d => `https://${d}`)
     : [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]);
+
+// Rutas públicas que pueden indexar los buscadores (el resto lleva X-Robots-Tag: noindex)
+function isPublicPath(p) {
+    return p === '/' || p.startsWith('/brand/') || p === '/favicon.ico' || p === '/robots.txt' || p === '/site.webmanifest';
+}
 
 function isAllowedRequest(req) {
     const host = String(req.headers.host || '').toLowerCase();
@@ -68,12 +76,12 @@ app.use((req, res, next) => {
     if (config.HOSTED && req.headers['x-forwarded-proto'] === 'http') {
         return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
     }
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     if (config.HOSTED) {
         res.setHeader('Strict-Transport-Security', 'max-age=15552000');
-        res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+        // Solo la portada (y sus iconos/imagen para compartir) puede aparecer en buscadores
+        if (!isPublicPath(req.path)) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     }
     next();
 });
@@ -116,8 +124,14 @@ app.post('/api/login', (req, res) => auth.login(req, res).catch((e) => {
 }));
 app.post('/api/panel-logout', (req, res) => auth.logout(req, res));
 
-// Lo único visible sin iniciar sesión: la portada, la página de acceso y sus estilos
+// Lo único visible sin iniciar sesión: la portada, sus iconos, la página de acceso y sus estilos
 app.get('/', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'home.html')));
+app.use('/brand', express.static(path.join(PUBLIC_DIR, 'brand'), { maxAge: '7d', index: false }));
+app.get(['/favicon.ico', '/robots.txt', '/site.webmanifest'], (req, res) => {
+    if (req.path === '/site.webmanifest') res.type('application/manifest+json');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.sendFile(path.join(PUBLIC_DIR, req.path.slice(1)));
+});
 app.get(['/login', '/login.html'], (req, res) => {
     if (auth.isAuthenticated(req)) return res.redirect('/panel');
     res.setHeader('Cache-Control', 'no-store');
@@ -279,8 +293,58 @@ async function ensureChromium() {
     }
 }
 
+// Chromium marca la sesión con el enlace SingletonLock -> "<equipo>-<pid>" mientras la usa.
+// Sirve para saber si otra copia de la app (p. ej. una que el alojamiento arrancó en paralelo) ya tiene WhatsApp abierto.
+function sessionLockOwner() {
+    const lock = path.join(config.WA_AUTH_DIR, 'session', 'SingletonLock');
+    let target;
+    try {
+        target = fs.readlinkSync(lock);
+    } catch (e) {
+        return null; // sin marca (o sistema sin enlaces, como Windows)
+    }
+    const pid = Number(String(target).split('-').pop()) || null;
+    let alive = false;
+    if (pid) {
+        try {
+            const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+            alive = /chrom/i.test(cmdline);
+        } catch (e) {
+            alive = false; // el proceso ya no existe
+        }
+    }
+    let ownedByUs = false;
+    if (alive) {
+        try {
+            // Campo 4 de /proc/<pid>/stat: proceso padre. Chromium es hijo de la copia que lo abrió.
+            const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+            ownedByUs = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]) === process.pid;
+        } catch (e) { /* sin datos: se asume que no es nuestro */ }
+    }
+    return { dir: path.dirname(lock), pid, alive, ownedByUs };
+}
+
+function checkSessionLock() {
+    const owner = sessionLockOwner();
+    if (!owner) return;
+    if (owner.alive && !owner.ownedByUs) {
+        // Dos copias conectadas responderían todo por duplicado: esta copia se retira y deja a la otra
+        console.warn(`Otra copia de la app ya tiene WhatsApp abierto (Chromium ${owner.pid}). Esta copia se cierra para no duplicar.`);
+        setTimeout(() => process.exit(0), 300);
+        throw new Error('WhatsApp ya está abierto en otra copia de la app');
+    }
+    if (!owner.alive) {
+        // Marca de un Chromium que ya no existe (p. ej. cerrado a la fuerza): se borra para poder arrancar
+        for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+            try { fs.unlinkSync(path.join(owner.dir, name)); } catch (e) { /* no estaba */ }
+        }
+        console.log(`Se ha quitado la marca de sesión de un Chromium que ya no existe (${owner.pid || '?'}).`);
+    }
+}
+
 async function startWhatsApp() {
     await ensureChromium();
+    checkSessionLock();
     // Se vigila Chromium desde que arranca (el evento llega antes de que termine initialize)
     const onLaunch = () => watchBrowser();
     const timer = setInterval(() => { if (client.pupBrowser) { clearInterval(timer); onLaunch(); } }, 200);
@@ -598,8 +662,9 @@ const MAX_MESSAGE_LENGTH = 1500;
 const MAX_QUOTE_LENGTH = 200;
 const READ_CONCURRENCY = 5;           // Chats leídos a la vez
 const MAX_CHATS_PER_RUN = 40;         // Chats con novedades analizados en una pasada
-const MAX_NEW_MESSAGES_PER_CHAT = 80; // Mensajes nuevos por chat como máximo
-const FIRST_FETCH = 30;               // Primera lectura por chat (se amplía si todo es nuevo)
+const MAX_NEW_MESSAGES_PER_CHAT = 250; // Mensajes nuevos por chat como máximo (grupos muy activos)
+// Lecturas sucesivas por chat: se amplía mientras todo lo leído sea nuevo
+const FETCH_STEPS = [30, 120, MAX_NEW_MESSAGES_PER_CHAT + 4];
 const CONTEXT_MESSAGES = 4;           // Mensajes anteriores ya analizados, solo como contexto
 const DAY = 86400;
 // La primera vez (o al reanalizar), cuántos días hacia atrás se mira
@@ -672,6 +737,19 @@ async function messageToLine(m, chat) {
         if (mediaLabel && m.hasMedia) body = `[${mediaLabel}] ${body}`;
     }
 
+    // Encuestas y eventos de WhatsApp: el texto solo trae el título; añadir opciones, fecha y descripción
+    if (m.type === 'poll_creation' && Array.isArray(m.pollOptions) && m.pollOptions.length) {
+        const options = m.pollOptions.map(o => o && o.name).filter(Boolean).slice(0, 12);
+        body = `[encuesta] ${clip(String(m.pollName || '').trim(), 300)} | opciones: ${options.join(' / ')}`;
+    } else if ((m.type === 'scheduled_event_creation' || m.type === 'event_creation') && m._data) {
+        const ev = m._data;
+        const parts = [`[evento] ${String(ev.eventName || m.body || '').trim()}`];
+        if (ev.eventStartTime) parts.push(`fecha: ${formatDayTime(Number(ev.eventStartTime))}`);
+        if (ev.eventLocation && ev.eventLocation.name) parts.push(`lugar: ${ev.eventLocation.name}`);
+        if (ev.eventDescription) parts.push(`detalle: ${clip(String(ev.eventDescription).trim(), 500)}`);
+        body = parts.join(' | ');
+    }
+
     let extra = '';
     if (m.isForwarded) extra += ' (reenviado)';
 
@@ -713,10 +791,10 @@ async function readChatSince(chat, since) {
     // Justo al arrancar, WhatsApp Web puede seguir cargando y fallar una lectura: se reintenta una vez
     for (let attempt = 1; ; attempt++) {
         try {
-            messages = await chat.fetchMessages({ limit: FIRST_FETCH });
             // Si hasta el más antiguo es nuevo, puede haber más: ampliar la lectura
-            if (messages.length >= FIRST_FETCH && messages[0].timestamp > since) {
-                messages = await chat.fetchMessages({ limit: MAX_NEW_MESSAGES_PER_CHAT + CONTEXT_MESSAGES });
+            for (const limit of FETCH_STEPS) {
+                messages = await chat.fetchMessages({ limit });
+                if (messages.length < limit || messages[0].timestamp <= since) break;
             }
             break;
         } catch (e) {
@@ -734,10 +812,16 @@ async function readChatSince(chat, since) {
     if (fresh.length === 0) return null;
     const newCursor = Math.max(...fresh.map(m => m.timestamp));
 
+    if (fresh.length > MAX_NEW_MESSAGES_PER_CHAT) {
+        console.warn(`${getChatName(chat)}: ${fresh.length} mensajes nuevos; se analizan los ${MAX_NEW_MESSAGES_PER_CHAT} más recientes.`);
+    }
     const newLines = [];
+    const sourceMessages = []; // para saber de qué mensaje (y cuándo) sale cada tarea
     for (const m of fresh.slice(-MAX_NEW_MESSAGES_PER_CHAT)) {
         const line = await messageToLine(m, chat);
-        if (line) newLines.push(line);
+        if (!line) continue;
+        newLines.push(line);
+        sourceMessages.push({ ts: m.timestamp, text: normalizeForMatch(line.slice(line.indexOf(': ') + 2)) });
     }
     // Solo había mensajes sin contenido útil: se avanza el cursor igualmente
     if (newLines.length === 0) return { chatId, newCursor, text: null };
@@ -761,7 +845,26 @@ async function readChatSince(chat, since) {
     }
     text += `Mensajes nuevos:\n${newLines.join('\n')}\n\n`;
 
-    return { chatId, newCursor, text, meta: { name: chatName, timestamp: chat.timestamp } };
+    return { chatId, newCursor, text, meta: { name: chatName, timestamp: chat.timestamp, messages: sourceMessages } };
+}
+
+function normalizeForMatch(text) {
+    return String(text || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9ñ]+/g, ' ').trim();
+}
+
+// Momento (ms) del mensaje del que sale una tarea, buscando su cita entre los mensajes leídos del chat
+function sourceMessageTime(quote, chatMeta) {
+    const q = normalizeForMatch(quote);
+    if (!q || !chatMeta || !Array.isArray(chatMeta.messages)) return null;
+    const probe = q.slice(0, 60);
+    // El más reciente que contenga la cita (o que esté contenido en ella, si la IA la amplió)
+    for (let i = chatMeta.messages.length - 1; i >= 0; i--) {
+        const m = chatMeta.messages[i];
+        if (!m.text) continue;
+        if (m.text.includes(probe) || (m.text.length >= 12 && q.includes(m.text))) return m.ts * 1000;
+    }
+    return null;
 }
 
 // Reúne los mensajes nuevos de todos los chats con actividad desde el último análisis
@@ -1090,11 +1193,14 @@ async function runPanelSummary() {
                     deadline: isValidIsoDate(item.deadline) ? item.deadline : '',
                     sourceId: item.sourceId,
                     time: formatTime(info.timestamp),
+                    lastMessageAt: (info.timestamp || 0) * 1000,
                     link: links[item.sourceId] || 'https://web.whatsapp.com/',
                 };
                 result.reasonLabel = reasonLabel(result);
                 return result;
             });
+            // La IA elige los más importantes; se muestran del más reciente al más antiguo
+            items.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
         }
 
         const result = { mode: 'recent', items, generatedAt: Date.now(), chatsRead: results.length };
@@ -1234,6 +1340,7 @@ function newTask(fields) {
         quote: String(fields.quote || '').slice(0, 1000),
         completed: !!fields.completed,
         createdAt: Number(fields.createdAt) || Date.now(),
+        messageAt: Number(fields.messageAt) || null, // cuándo llegó el mensaje del que sale (ms)
         completedAt: fields.completed ? (Number(fields.completedAt) || Date.now()) : null,
         remindedOn: null,
     };
@@ -1327,6 +1434,7 @@ async function runTaskExtraction({ full = false } = {}) {
                     ...t,
                     sourceName: (meta[t.sourceId] && meta[t.sourceId].name) || t.sourceName,
                     link: links[t.sourceId] || 'https://web.whatsapp.com/',
+                    messageAt: sourceMessageTime(t.quote, meta[t.sourceId]),
                 });
 
                 // ¿Ya la tiene? Primero lo que diga la IA, después la comparación por parecido
@@ -2772,6 +2880,8 @@ store.init()
         cleanDuplicateTasks();
         server.listen(...listenArgs, () => {
             const where = result.backend === 'mysql' ? 'MySQL' : 'archivo store.json';
+            // Las copias que arranquen después (otros dominios) reenviarán su tráfico a este socket
+            instance.registerPrimary(server);
             if (config.HOSTED) {
                 console.log(`Servidor web en marcha${config.DOMAINS.length ? ` en https://${config.DOMAINS[0]}` : ''}. Zona horaria: ${process.env.TZ}. Datos: ${where}.`);
             } else {
